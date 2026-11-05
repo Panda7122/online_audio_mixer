@@ -1,6 +1,7 @@
 'use strict';
 
 /* Online Audio Mixer backend: REST API + (optionally) the static frontend. */
+const crypto = require('node:crypto');
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -11,6 +12,17 @@ const audioRouter = require('./routes/audio');
 const presetsRouter = require('./routes/presets');
 const separationRouter = require('./routes/separation');
 const { SeparationService } = require('./separation');
+
+// Reject API requests without the configured access key (constant-time comparison).
+function requireToken(token) {
+  const expected = crypto.createHash('sha256').update(token).digest();
+  return (req, res, next) => {
+    const header = req.get('authorization') || '';
+    const given = crypto.createHash('sha256').update(header.startsWith('Bearer ') ? header.slice(7) : '').digest();
+    if (crypto.timingSafeEqual(given, expected)) return next();
+    res.status(401).json({ error: 'Access key required' });
+  };
+}
 
 async function createApp(cfg = config) {
   const storage = new Storage(cfg.storageDir);
@@ -25,8 +37,9 @@ async function createApp(cfg = config) {
   app.use('/api', express.json({ limit: `${cfg.maxJsonMb}mb` }));
 
   app.get('/api/health', (req, res) => {
-    res.json({ ok: true, name: 'online-audio-mixer', version: 1, maxUploadMb: cfg.maxUploadMb });
+    res.json({ ok: true, name: 'online-audio-mixer', version: 1, maxUploadMb: cfg.maxUploadMb, auth: !!cfg.apiToken, runtime: 'node' });
   });
+  if (cfg.apiToken) app.use('/api', requireToken(cfg.apiToken));
   app.use('/api/projects', projectsRouter(storage));
   app.use('/api/audio', audioRouter(storage, cfg));
   app.use('/api/strip-presets', presetsRouter(storage));

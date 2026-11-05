@@ -303,6 +303,7 @@ kbd {
 .server-status { font-size: 12px; cursor: pointer; padding: 3px 8px; border-radius: 20px; border: 1px solid var(--line); }
 .server-status.online { color: var(--ok); border-color: rgba(90, 209, 154, .4); }
 .server-status.offline { color: var(--muted); }
+.server-status.locked { color: var(--accent-2); border-color: rgba(255, 181, 71, .45); }
 body.server-offline .server-only { display: none; }
 .my-preset-group { display: flex; gap: 6px; align-items: center; }
 .my-presets { max-width: 220px; }

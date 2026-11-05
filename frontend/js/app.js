@@ -863,7 +863,21 @@
 
   /* ---------- Backend (server) features ---------- */
   async function checkServer() {
-    S.server = await API.health();
+    const info = await API.health();
+    S.serverLocked = false;
+    if (info && info.auth) {
+      // The server needs an access key: only enable server features when ours is accepted.
+      let ok = false;
+      try { ok = await API.checkAccess(); } catch (e) { ok = false; }
+      if (!ok) {
+        S.server = null;
+        S.serverLocked = true;
+        renderServerBadge();
+        renderInspector();
+        return;
+      }
+    }
+    S.server = info;
     renderServerBadge();
     if (S.server) await loadMyPresets();
     renderInspector();
@@ -873,9 +887,9 @@
 
   function renderServerBadge() {
     const el = $('#serverStatus');
-    el.className = 'server-status ' + (S.server ? 'online' : 'offline');
-    el.textContent = S.server ? '● ' + t('serverOnline') : '○ ' + t('serverOffline');
-    el.title = S.server ? t('serverOnlineTip') : t('serverOfflineTip');
+    el.className = 'server-status ' + (S.server ? 'online' : S.serverLocked ? 'locked' : 'offline');
+    el.textContent = S.server ? '● ' + t('serverOnline') : S.serverLocked ? '🔒 ' + t('serverLocked') : '○ ' + t('serverOffline');
+    el.title = S.server ? t('serverOnlineTip') : S.serverLocked ? t('serverLockedTip') : t('serverOfflineTip');
     document.body.classList.toggle('server-offline', !S.server);
   }
 
@@ -2844,7 +2858,17 @@
     $('#btnSeparate').addEventListener('click', separateButton);
     $('#btnSepClose').addEventListener('click', () => $('#sepDlg').close());
     $('#btnProjectsClose').addEventListener('click', () => $('#projectsDlg').close());
-    $('#serverStatus').addEventListener('click', checkServer);
+    $('#serverStatus').addEventListener('click', async () => {
+      if (S.serverLocked || (S.server && S.server.auth && !API.hasKey())) {
+        const key = prompt(t('enterAccessKey'));
+        if (key == null) return;
+        API.setKey(key);
+        await checkServer();
+        toast(S.serverLocked ? t('badAccessKey') : t('serverOnline'));
+        return;
+      }
+      checkServer();
+    });
     $('#btnAutoMix').addEventListener('click', autoMixAll);
     $('#btnResetAll').addEventListener('click', resetAll);
 

@@ -121,7 +121,12 @@ class Storage {
   static audioIdsOf(p) {
     const ids = new Set();
     const tracks = p && p.settings && Array.isArray(p.settings.tracks) ? p.settings.tracks : [];
-    for (const t of tracks) if (t && isId(t.audioId)) ids.add(t.audioId);
+    for (const t of tracks) {
+      if (t && isId(t.audioId)) ids.add(t.audioId);
+      // Uploaded instrument samples are audio too.
+      const zones = t && t.sampler && Array.isArray(t.sampler.zones) ? t.sampler.zones : [];
+      for (const z of zones) if (z && isId(z.audioId)) ids.add(z.audioId);
+    }
     return ids;
   }
 

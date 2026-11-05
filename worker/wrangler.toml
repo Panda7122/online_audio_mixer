@@ -1,0 +1,28 @@
+# Cloudflare Worker for the Online Audio Mixer.
+# Deploy: see README ("Cloudflare Workers"). Secrets are set with `npx wrangler secret put <NAME>`:
+#   API_TOKEN            access key for the API (strongly recommended on a public URL)
+#   REPLICATE_API_TOKEN  enables AI source separation (HTDemucs on Replicate, billed per use)
+name = "online-audio-mixer"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# The static frontend; /api/* always goes to the Worker script.
+[assets]
+directory = "../frontend"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+# Projects, audio, samples, presets and separation jobs.
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "online-audio-mixer"
+
+[vars]
+# Workers accept request bodies up to 100 MB (Free/Pro plans).
+MAX_UPLOAD_MB = "95"
+MAX_JSON_MB = "5"
+# Comma-separated origins allowed to call the API from another site (e.g. a GitHub Pages copy).
+CORS_ORIGIN = ""
+# Replicate model version (ryan5453/demucs) and stem format.
+REPLICATE_VERSION = "b26a4313b4d75983d60657f80dfa93b9beb354f6e4fa29ecd27ffe14d60117f6"
+REPLICATE_OUTPUT_FORMAT = "flac"

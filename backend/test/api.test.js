@@ -132,6 +132,53 @@ test('source separation jobs', async () => {
   assert.equal((await fetch(`${base}/api/separation/jobs/unknown`)).status, 404);
 });
 
+test('raw streamed upload', async () => {
+  const r = await fetch(`${base}/api/audio`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'audio/wav', 'X-File-Name': encodeURIComponent('鋼琴 C4.wav') },
+    body: tinyWav(),
+  });
+  assert.equal(r.status, 201);
+  const a = await r.json();
+  assert.equal(a.name, '鋼琴 C4.wav');
+  assert.equal(Buffer.from(await (await fetch(`${base}${a.url}`)).arrayBuffer()).length, tinyWav().length);
+  const bad = await fetch(`${base}/api/audio`, { method: 'POST', headers: { 'Content-Type': 'text/plain', 'X-File-Name': 'a.txt' }, body: 'hi' });
+  assert.equal(bad.status, 415);
+  const big = await fetch(`${base}/api/audio`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: Buffer.alloc(2 * 1024 * 1024) });
+  assert.equal(big.status, 413);
+});
+
+test('deleting a project keeps samples used by another project', async () => {
+  const sample = await (await uploadWav('Piano C4.wav')).json();
+  const zoneTrack = { name: 'Keys', kind: 'notes', sampler: { zones: [{ name: 'Piano C4.wav', root: 60, audioId: sample.id }] } };
+  const a = await (await fetch(`${base}/api/projects`, json('POST', { name: 'A', settings: { tracks: [zoneTrack] } }))).json();
+  const b = await (await fetch(`${base}/api/projects`, json('POST', { name: 'B', settings: { tracks: [zoneTrack] } }))).json();
+  await fetch(`${base}/api/projects/${a.id}`, { method: 'DELETE' });
+  assert.equal((await fetch(`${base}${sample.url}`)).status, 200, 'still used by B');
+  await fetch(`${base}/api/projects/${b.id}`, { method: 'DELETE' });
+  assert.equal((await fetch(`${base}${sample.url}`)).status, 404, 'removed with the last project');
+});
+
+test('access key', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oam-auth-'));
+  const app = await createApp({
+    storageDir: dir, serveFrontend: false, frontendDir: '', corsOrigins: [], maxUploadMb: 1, maxJsonMb: 1, apiToken: 's3cret',
+    separator: { python: process.execPath, script: path.join(__dirname, 'fake-separator.js'), modelsDir: dir, device: 'auto', timeoutMin: 1 },
+  });
+  const srv = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+  const b2 = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const health = await (await fetch(`${b2}/api/health`)).json();
+    assert.equal(health.auth, true);
+    assert.equal((await fetch(`${b2}/api/projects`)).status, 401);
+    assert.equal((await fetch(`${b2}/api/projects`, { headers: { Authorization: 'Bearer wrong' } })).status, 401);
+    assert.equal((await fetch(`${b2}/api/projects`, { headers: { Authorization: 'Bearer s3cret' } })).status, 200);
+  } finally {
+    await new Promise(resolve => srv.close(resolve));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('strip presets', async () => {
   const strip = { volumeDb: 0, pan: 0, eq: { enabled: true }, comp: { enabled: false }, junk: 1 };
   const r = await fetch(`${base}/api/strip-presets`, json('POST', { name: 'My vocal', role: 'vocal', strip }));

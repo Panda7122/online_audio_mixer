@@ -11,10 +11,17 @@
     }
   }
 
+  // Optional access key (servers started with API_TOKEN); kept in this browser only.
+  const KEY_STORE = 'oam-api-key';
+  let apiKey = '';
+  try { apiKey = localStorage.getItem(KEY_STORE) || ''; } catch (e) { /* storage unavailable */ }
+
   async function request(path, opts = {}) {
     let res;
+    const headers = new Headers(opts.headers || {});
+    if (apiKey) headers.set('Authorization', 'Bearer ' + apiKey);
     try {
-      res = await fetch(base + '/api' + path, opts);
+      res = await fetch(base + '/api' + path, { ...opts, headers });
     } catch (e) {
       throw new ApiError('Network error: ' + e.message, 0);
     }
@@ -55,11 +62,32 @@
     updateProject: (id, name, settings) => request('/projects/' + encodeURIComponent(id), jsonOpts('PUT', { name, settings })),
     deleteProject: id => request('/projects/' + encodeURIComponent(id), { method: 'DELETE' }),
 
+    hasKey: () => !!apiKey,
+    setKey(key) {
+      apiKey = String(key || '').trim();
+      try {
+        if (apiKey) localStorage.setItem(KEY_STORE, apiKey);
+        else localStorage.removeItem(KEY_STORE);
+      } catch (e) { /* storage unavailable */ }
+    },
+    // Returns true when the server accepts the current key (or needs none).
+    async checkAccess() {
+      try {
+        await request('/strip-presets');
+        return true;
+      } catch (e) {
+        if (e.status === 401) return false;
+        throw e;
+      }
+    },
+
+    // Raw streamed upload; the file name travels URI-encoded in a header.
     uploadAudio(blob, name) {
-      const fd = new FormData();
-      fd.append('name', name);
-      fd.append('file', blob, name);
-      return request('/audio', { method: 'POST', body: fd });
+      return request('/audio', {
+        method: 'POST',
+        headers: { 'Content-Type': blob.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(name) },
+        body: blob,
+      });
     },
     async fetchAudio(id) {
       const res = await request('/audio/' + encodeURIComponent(id));

@@ -5,3 +5,5 @@ backend/separator/models/
 __pycache__/
 *.log
 .DS_Store
+.wrangler/
+.dev.vars

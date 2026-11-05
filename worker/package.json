@@ -1,0 +1,16 @@
+{
+  "name": "online-audio-mixer-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker backend for the Online Audio Mixer (R2 storage, Replicate source separation).",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.3",
+    "miniflare": "4.20260730.0"
+  }
+}

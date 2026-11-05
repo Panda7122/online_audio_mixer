@@ -287,6 +287,11 @@ const I18N = {
     downloadingSamples: 'Downloading samples {i}/{n}…',
     uploadingSamples: 'Uploading samples {i}/{n}…',
 
+    serverLocked: 'Access key needed',
+    serverLockedTip: 'This server is protected. Click to enter the access key (API_TOKEN). Mixing works without it.',
+    enterAccessKey: 'Access key for this server (the API_TOKEN set by its owner):',
+    badAccessKey: 'The access key was not accepted.',
+
     helpHtml: `
 <section>
   <h3>1. Quick start</h3>
@@ -710,6 +715,11 @@ const I18N = {
     samplesMissing: '有 {n} 個取樣缺少音訊，請在「取樣音色」卡片中重新上傳。',
     downloadingSamples: '正在下載取樣 {i}/{n}…',
     uploadingSamples: '正在上傳取樣 {i}/{n}…',
+
+    serverLocked: '需要存取金鑰',
+    serverLockedTip: '這個伺服器有保護。點此輸入存取金鑰（API_TOKEN）。不輸入也可以使用混音功能。',
+    enterAccessKey: '請輸入這個伺服器的存取金鑰（伺服器擁有者設定的 API_TOKEN）：',
+    badAccessKey: '存取金鑰不正確。',
 
     helpHtml: `
 <section>

@@ -19,6 +19,8 @@ module.exports = {
   corsOrigins: (process.env.CORS_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean),
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB) || 200,
   maxJsonMb: Number(process.env.MAX_JSON_MB) || 5,
+  // Optional access key. When set, every /api request except /api/health needs "Authorization: Bearer <key>".
+  apiToken: process.env.API_TOKEN || '',
 
   // HTDemucs source separation (Python worker, see backend/separator/).
   separator: {

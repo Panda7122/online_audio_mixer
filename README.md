@@ -41,7 +41,11 @@ online_audio_mixer/
 │       ├── sampler.js        # 取樣工具：檔名判斷根音、音高偵測、鼓件判斷、去除開頭靜音
 │       ├── noteeditor.js     # 每小節的打譜編輯器（鋼琴捲簾／鼓格）
 │       └── app.js            # 介面、播放、錄音、編輯、儲存／載入、匯出
-└── backend/                  # Node.js + Express REST API
+├── worker/                   # Cloudflare Workers 版後端（R2 儲存、Replicate 音源分離）
+│   ├── wrangler.toml
+│   ├── src/                  # index.js（路由）、storage.js（R2）、separation.js（Replicate）、http.js
+│   └── test/                 # Miniflare 整合測試
+└── backend/                  # Node.js + Express REST API（本機／自架，可用自己的 GPU 跑 HTDemucs）
     ├── package.json
     ├── src/
     │   ├── server.js         # 進入點：API + （可選）提供前端靜態檔
@@ -124,6 +128,56 @@ python3 -m http.server 8080
    CORS_ORIGIN=http://localhost:8080 SERVE_FRONTEND=false npm start
    ```
 
+## 部署到 Cloudflare Workers（不需要自己的電腦開機）
+
+`worker/` 是後端的 Cloudflare Workers 版本，提供與 Node.js 後端**相同的 REST API**，前端不需修改：
+
+- **Worker**：提供前端靜態檔案（Workers Static Assets）與 `/api/*`。
+- **R2**：存放專案、音訊、取樣、個人預設與分離工作（一個 bucket）。
+- **AI 音源分離**：HTDemucs 需要 Python、PyTorch 與 GPU，無法在 Workers 上執行，所以改用 [Replicate](https://replicate.com/ryan5453/demucs) 的雲端 GPU（依使用量計費，需自行設定 token；不設定時分離功能會自動停用，其他功能照常）。
+
+### 第一次部署
+
+```bash
+cd worker
+npm install
+npx wrangler login                                  # 登入 Cloudflare
+npx wrangler r2 bucket create online-audio-mixer    # 建立 R2 bucket（名稱需與 wrangler.toml 相同）
+npx wrangler secret put API_TOKEN                   # 設定存取金鑰（強烈建議，見下方說明）
+npx wrangler secret put REPLICATE_API_TOKEN         # 選用：啟用 AI 音源分離
+npx wrangler deploy
+```
+
+部署完成後會得到 `https://online-audio-mixer.<你的帳號>.workers.dev`，前端和 API 都在這個網址。第一次開啟時，點右上角的「🔒 需要存取金鑰」輸入 `API_TOKEN`，瀏覽器會記住它。沒有金鑰的人仍可使用所有不需要伺服器的功能（混音、打譜、匯出）。
+
+### 自動部署（GitHub Actions）
+
+`.github/workflows/deploy-worker.yml` 會在 `main` 分支的 `frontend/` 或 `worker/` 有變更時，自動執行測試並部署。需要在 GitHub repo 的 Settings → Secrets and variables → Actions 加入：
+
+- `CLOUDFLARE_API_TOKEN`：在 Cloudflare 後台 My Profile → API Tokens 建立，使用「Edit Cloudflare Workers」範本即可（需包含 Workers Scripts 與 Workers R2 Storage 的編輯權限）。
+- `CLOUDFLARE_ACCOUNT_ID`：Cloudflare 後台 Workers & Pages 頁面右側可以看到。
+
+沒有設定這兩個 secret 時，workflow 會自動跳過部署。`API_TOKEN`、`REPLICATE_API_TOKEN` 只需要用 `wrangler secret put` 設定一次，之後的部署會保留。
+
+### Worker 設定
+
+| 名稱 | 類型 | 說明 |
+|---|---|---|
+| `API_TOKEN` | secret | 存取金鑰。設定後，除了 `/api/health`，所有 API 都需要 `Authorization: Bearer <金鑰>`。網址公開時**一定要設定**，否則任何人都能上傳檔案、使用你的 Replicate 額度 |
+| `REPLICATE_API_TOKEN` | secret | Replicate 的 API token，用於 AI 音源分離 |
+| `MAX_UPLOAD_MB` | var | 單一檔案上傳上限，預設 95（Workers 免費／Pro 方案的請求上限是 100 MB） |
+| `MAX_JSON_MB` | var | JSON 請求上限，預設 5 |
+| `CORS_ORIGIN` | var | 允許從其他網站呼叫 API 的來源，以逗號分隔（例如前端另外放在 GitHub Pages 時） |
+| `REPLICATE_VERSION` | var | Replicate 上 `ryan5453/demucs` 的版本 ID |
+| `REPLICATE_OUTPUT_FORMAT` | var | 分軌格式，預設 `flac` |
+
+### 費用與限制
+
+- **Cloudflare 免費方案**通常就夠用：Workers 每天 10 萬次請求，R2 免費 10 GB 儲存空間，且沒有流量（egress）費用。
+- **請求與 CPU 限制**：Workers 單一請求上限 100 MB，所以檔案上傳上限是 95 MB。免費方案每個請求只有 10 ms CPU 時間。音訊上傳以串流直接寫入 R2，幾乎不耗 CPU；但專案很多時，刪除專案（需要檢查哪些音訊還在使用）可能接近上限。遇到問題時，可改用 Workers 付費方案（每月 5 美元，CPU 上限 30 秒）。
+- **AI 音源分離**依 Replicate 的 GPU 使用時間計費。分離工作沒有背景程序，進度在前端每秒查詢時推進：完成後會把分軌從 Replicate 複製到 R2。
+- **本機測試**：在 `worker/` 執行 `npx wrangler dev`（使用本機模擬的 R2），或執行 `npm test` 跑 Worker 的整合測試（用 Miniflare 模擬 R2 與 Replicate）。
+
 ## 後端設定（環境變數）
 
 | 變數 | 預設值 | 說明 |
@@ -136,6 +190,7 @@ python3 -m http.server 8080
 | `CORS_ORIGIN` | （空，僅同源） | 允許跨來源存取的前端網址，以逗號分隔 |
 | `MAX_UPLOAD_MB` | `200` | 單一音訊檔上傳上限（MB） |
 | `MAX_JSON_MB` | `5` | JSON 請求大小上限（MB） |
+| `API_TOKEN` | （空） | 選用的存取金鑰。設定後，除了 `/api/health`，所有 API 都需要 `Authorization: Bearer <金鑰>` |
 | `SEPARATOR_PYTHON` | `backend/separator/.venv/bin/python` | 執行分離 worker 的 Python |
 | `SEPARATOR_SCRIPT` | `backend/separator/separate.py` | 分離 worker 腳本 |
 | `SEPARATOR_MODELS_DIR` | `backend/separator/models` | 模型權重快取（`TORCH_HOME`） |
@@ -154,7 +209,7 @@ python3 -m http.server 8080
 | POST | `/api/projects` | 建立專案，body：`{ name, settings }` → `201` |
 | PUT | `/api/projects/:id` | 更新名稱和／或設定，body：`{ name?, settings? }` |
 | DELETE | `/api/projects/:id` | 刪除專案，並刪除沒有其他專案使用的音訊 → `204` |
-| POST | `/api/audio` | 上傳音訊（`multipart/form-data`，欄位 `file`，選填 `name`）→ `201 { id, name, size, mimeType, url }` |
+| POST | `/api/audio` | 上傳音訊：建議用原始內容串流上傳（`Content-Type: audio/*`，標頭 `X-File-Name` 放 URI 編碼的檔名），也支援 `multipart/form-data`（欄位 `file`，選填 `name`）→ `201 { id, name, size, mimeType, url }` |
 | GET | `/api/audio/:id` | 下載音訊（支援 Range 請求） |
 | DELETE | `/api/audio/:id` | 刪除音訊 → `204` |
 | GET | `/api/strip-presets` | 個人預設清單 `{ presets: [{ id, name, role, createdAt, strip }] }` |
