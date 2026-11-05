@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Online Audio Mixer</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='12' width='4' height='16' rx='1' fill='%234cc3ff'/%3E%3Crect x='14' y='4' width='4' height='24' rx='1' fill='%23ffb547'/%3E%3Crect x='24' y='9' width='4' height='19' rx='1' fill='%239b8cff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Top bar: brand, help, language switch -->
+  <header class="topbar">
+    <div class="brand"><span class="logo" aria-hidden="true"></span><span data-i18n="appTitle"></span><span id="projectName" class="project-name"></span></div>
+    <div class="top-actions">
+      <span id="serverStatus" class="server-status"></span>
+      <button id="btnHelp" class="btn ghost">? <span data-i18n="help"></span></button>
+      <div class="lang-switch" role="group" aria-label="Language">
+        <button data-lang="zh">中文</button>
+        <button data-lang="en">EN</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Transport, project and master controls -->
+  <section class="toolbar">
+    <div class="group transport">
+      <button id="btnHome" class="btn icon" data-i18n-title="toStart">⏮</button>
+      <button id="btnPlay" class="btn icon primary" data-i18n-title="playPause">▶</button>
+      <button id="btnStop" class="btn icon" data-i18n-title="stop">■</button>
+      <button id="btnRecord" class="btn icon rec" data-i18n-title="record">●</button>
+      <div class="time">
+        <div id="timeMain">00:00.000</div>
+        <div id="timeBars" class="sub">1.1</div>
+      </div>
+    </div>
+    <div class="group">
+      <label class="mini"><span data-i18n="bpm"></span><input id="bpm" type="number" min="40" max="240" step="1" value="120"></label>
+      <label class="mini"><span data-i18n="zoom"></span><input id="zoom" type="range" min="10" max="300" value="60"></label>
+      <label class="chk"><input id="snap" type="checkbox"><span data-i18n="snap"></span></label>
+    </div>
+    <div class="group files">
+      <button id="btnAddAudio" class="btn">+ <span data-i18n="addAudio"></span></button>
+      <button id="btnAddEmpty" class="btn" data-i18n="addEmpty"></button>
+      <button id="btnSave" class="btn" data-i18n="saveSettings"></button>
+      <button id="btnLoad" class="btn" data-i18n="loadSettings"></button>
+      <button id="btnExport" class="btn accent" data-i18n="exportWav"></button>
+    </div>
+    <div class="group server-only">
+      <button id="btnServerSave" class="btn" data-i18n="saveToServer"></button>
+      <button id="btnServerOpen" class="btn" data-i18n="openFromServer"></button>
+    </div>
+    <div class="group master">
+      <span class="lbl" data-i18n="master"></span>
+      <input id="masterVol" type="range" min="-30" max="6" step="0.1" value="0">
+      <span id="masterVolVal" class="val">0.0 dB</span>
+      <label class="chk"><input id="masterLimiter" type="checkbox" checked><span data-i18n="limiter"></span></label>
+      <div class="meter stereo" id="masterMeter"><div class="bar"></div><div class="bar"></div></div>
+    </div>
+  </section>
+
+  <!-- Global auto-mix (genre templates) -->
+  <section class="automix">
+    <span class="am-title">⚡ <span data-i18n="autoMix"></span></span>
+    <label class="mini"><span data-i18n="genre"></span><select id="genre"></select></label>
+    <label class="mini"><span data-i18n="stereoWidth"></span><select id="panMode"></select></label>
+    <div class="am-mods" id="amMods"></div>
+    <button id="btnAutoMix" class="btn accent" data-i18n="autoMixAll"></button>
+    <button id="btnResetAll" class="btn ghost" data-i18n="resetAll"></button>
+    <span id="genreDesc" class="am-desc"></span>
+  </section>
+
+  <!-- Multitrack timeline -->
+  <main class="workspace">
+    <div id="timeline" class="timeline"><div id="tlInner" class="tl-inner"></div></div>
+    <div id="emptyHint" class="empty-hint" data-i18n-html="emptyHint"></div>
+  </main>
+
+  <!-- Channel strip for the selected track -->
+  <section id="inspector" class="inspector"></section>
+
+  <!-- Usage instructions -->
+  <dialog id="helpDlg" class="help">
+    <div class="help-head">
+      <h2 data-i18n="helpTitle"></h2>
+      <button class="btn icon" id="btnHelpClose" aria-label="Close">✕</button>
+    </div>
+    <div id="helpBody" class="help-body"></div>
+  </dialog>
+
+  <!-- Projects stored on the backend -->
+  <dialog id="projectsDlg" class="help">
+    <div class="help-head">
+      <h2 data-i18n="projectsTitle"></h2>
+      <button class="btn icon" id="btnProjectsClose" aria-label="Close">✕</button>
+    </div>
+    <div id="projectsBody" class="help-body"></div>
+  </dialog>
+
+  <input type="file" id="fileAudio" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.opus" multiple hidden>
+  <input type="file" id="fileOne" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.opus" hidden>
+  <input type="file" id="fileJson" accept=".json,application/json" hidden>
+  <div id="dropOverlay" class="drop-overlay"><div data-i18n="dropHere"></div></div>
+  <div id="toast" class="toast" role="status"></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/presets.js"></script>
+  <script src="js/dsp.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

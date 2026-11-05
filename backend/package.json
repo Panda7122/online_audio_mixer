@@ -1,0 +1,20 @@
+{
+  "name": "online-audio-mixer-backend",
+  "version": "1.0.0",
+  "description": "REST API for the Online Audio Mixer: projects (settings + audio) and personal channel-strip presets.",
+  "main": "src/server.js",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "cors": "2.8.5",
+    "express": "5.1.0",
+    "multer": "2.5.0"
+  }
+}
