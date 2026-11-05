@@ -48,6 +48,7 @@
     <div class="group server-only">
       <button id="btnServerSave" class="btn" data-i18n="saveToServer"></button>
       <button id="btnServerOpen" class="btn" data-i18n="openFromServer"></button>
+      <button id="btnSeparate" class="btn ai">✦ <span data-i18n="separateBtn"></span><span id="sepBadge"></span></button>
     </div>
     <div class="group master">
       <span class="lbl" data-i18n="master"></span>
@@ -94,6 +95,15 @@
       <button class="btn icon" id="btnProjectsClose" aria-label="Close">✕</button>
     </div>
     <div id="projectsBody" class="help-body"></div>
+  </dialog>
+
+  <!-- HTDemucs source separation -->
+  <dialog id="sepDlg" class="help sep-dlg">
+    <div class="help-head">
+      <h2 data-i18n="sepTitle"></h2>
+      <button class="btn icon" id="btnSepClose" aria-label="Close">✕</button>
+    </div>
+    <div id="sepBody" class="help-body"></div>
   </dialog>
 
   <input type="file" id="fileAudio" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.opus" multiple hidden>

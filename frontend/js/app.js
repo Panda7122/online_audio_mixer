@@ -65,6 +65,10 @@
     projectId: null,
     projectName: '',
     myPresets: [],
+    separation: null, // backend separation capabilities
+    sepJob: null, // running separation job
+    sepTarget: null, // track chosen in the separation dialog
+    sepOpts: { model: 'htdemucs', shifts: 1, stems: null, muteOriginal: true, autoMix: true },
     trackCtrls: [],
     inspCtrls: [],
     eqCanvas: null,
@@ -796,6 +800,8 @@
     renderServerBadge();
     if (S.server) await loadMyPresets();
     renderInspector();
+    await loadSeparationInfo(false);
+    renderInspector();
   }
 
   function renderServerBadge() {
@@ -832,6 +838,22 @@
     if (todo.length) renderAll();
   }
 
+  // Upload a track's original audio to the server (once) and return its audio id.
+  async function ensureUploaded(tr) {
+    if (tr.audioId) return tr.audioId; // may already be set through a track sharing the same source
+    let blob = tr.source;
+    let fileName = tr.fileName || safeName(tr.name) + '.wav';
+    if (!blob) {
+      // No original file available: upload the decoded audio as WAV (un-reversed, like an original).
+      blob = DSP.encodeWav(tr.reversed ? DSP.reversed(S.ctx, tr.buffer) : tr.buffer);
+      fileName = safeName(tr.name) + '.wav';
+    }
+    if (blob.size > S.server.maxUploadMb * 1024 * 1024) throw new Error(t('fileTooLarge', { name: fileName, mb: S.server.maxUploadMb }));
+    const res = await API.uploadAudio(blob, fileName);
+    for (const x of S.tracks) if (x === tr || (!x.audioId && x.source && x.source === tr.source)) x.audioId = res.id;
+    return res.id;
+  }
+
   async function saveToServer() {
     if (!S.server) { toast(t('serverOffline')); return; }
     if (!S.tracks.length) { toast(t('noTracks')); return; }
@@ -842,19 +864,8 @@
     try {
       const pending = S.tracks.filter(x => x.buffer && !x.audioId);
       for (let i = 0; i < pending.length; i++) {
-        const tr = pending[i];
-        if (tr.audioId) continue; // already uploaded through a track sharing the same source
         toast(t('uploadingAudio', { i: i + 1, n: pending.length }), 60000);
-        let blob = tr.source;
-        let fileName = tr.fileName || safeName(tr.name) + '.wav';
-        if (!blob) {
-          // No original file available: upload the decoded audio as WAV (un-reversed, like an original).
-          blob = DSP.encodeWav(tr.reversed ? DSP.reversed(S.ctx, tr.buffer) : tr.buffer);
-          fileName = safeName(tr.name) + '.wav';
-        }
-        if (blob.size > S.server.maxUploadMb * 1024 * 1024) throw new Error(t('fileTooLarge', { name: fileName, mb: S.server.maxUploadMb }));
-        const res = await API.uploadAudio(blob, fileName);
-        for (const x of S.tracks) if (x === tr || (!x.audioId && x.source && x.source === tr.source)) x.audioId = res.id;
+        await ensureUploaded(pending[i]);
       }
       const settings = buildSettings();
       // Same name = update the open project; a new name = save as a new project.
@@ -965,6 +976,232 @@
       } catch (e) { toast(t('serverError', { msg: e.message }), 6000); }
     } }, '✕');
     return h('div', { class: 'my-preset-group' }, sel, save, del);
+  }
+
+  /* ---------- AI source separation (HTDemucs on the backend) ---------- */
+  const STEM_ROLES = { vocals: 'vocal', drums: 'drums', bass: 'bass', guitar: 'electricGuitar', piano: 'piano', other: 'other' };
+  const SEP_MODELS = ['htdemucs', 'htdemucs_ft', 'htdemucs_6s'];
+  const SEP_SHIFTS = [1, 2, 5];
+
+  async function loadSeparationInfo(refresh) {
+    try { S.separation = S.server ? await API.separationInfo(refresh) : null; } catch (e) { S.separation = null; }
+  }
+
+  // Toolbar button: separate the selected track, or pick a new file first.
+  async function separateButton() {
+    if (!S.server) { toast(t('serverOfflineTip'), 6000); return; }
+    if (S.sepJob) { openSeparationDialog(null); return; }
+    const tr = selected();
+    if (tr && tr.buffer) { openSeparationDialog(tr); return; }
+    const [f] = await pickFiles($('#fileOne'));
+    if (!f) return;
+    await addAudioFiles([f]);
+    const added = selected();
+    if (added && added.buffer) openSeparationDialog(added);
+  }
+
+  function openSeparationDialog(tr) {
+    if (tr) S.sepTarget = tr;
+    renderSeparationDialog();
+    const dlg = $('#sepDlg');
+    if (!dlg.open) dlg.showModal();
+    if (!S.separation || !S.separation.available) {
+      loadSeparationInfo(true).then(renderSeparationDialog);
+    }
+  }
+
+  function renderSeparationDialog() {
+    const body = $('#sepBody');
+    if (!body) return;
+    body.innerHTML = '';
+    const info = S.separation;
+
+    // A job is in progress: show its progress.
+    if (S.sepJob) {
+      const sj = S.sepJob;
+      body.append(
+        h('p', {}, t('sepRunningFor'), ' ', h('strong', { text: sj.trackName })),
+        h('p', { class: 'hint', text: `${t('model_' + sj.opts.model)} · ${t('sepStems')}: ${sj.stems.map(s => t('stem_' + s)).join(', ')}` }),
+        h('div', { class: 'sep-progress' }, h('div', { class: 'sep-bar', id: 'sepBar' })),
+        h('div', { class: 'sep-status' }, h('span', { id: 'sepStage' }), h('span', { id: 'sepPct', class: 'mono' })),
+        h('div', { class: 'btn-row' },
+          h('button', { class: 'btn danger', onclick: cancelSeparation }, t('cancel')),
+          h('button', { class: 'btn', onclick: () => $('#sepDlg').close() }, t('sepBackground'))));
+      updateSepProgress();
+      return;
+    }
+
+    if (!info) {
+      body.append(h('p', { class: 'hint', text: t('sepChecking') }));
+      return;
+    }
+    if (!info.available) {
+      body.append(
+        h('p', { text: t('sepUnavailable') }),
+        h('p', { class: 'hint', text: info.reason || '' }),
+        h('pre', { class: 'code' }, 'cd backend/separator\n./setup.sh        # NVIDIA GPU (CUDA)\n./setup.sh cpu    # CPU only'),
+        h('button', { class: 'btn', onclick: async () => { S.separation = null; renderSeparationDialog(); await loadSeparationInfo(true); renderSeparationDialog(); } }, t('retry')));
+      return;
+    }
+
+    const tr = S.sepTarget && S.tracks.includes(S.sepTarget) ? S.sepTarget : null;
+    if (!tr || !tr.buffer) {
+      body.append(h('p', { text: t('sepNeedTrack') }));
+      return;
+    }
+    const o = S.sepOpts;
+    if (!info.models[o.model]) o.model = 'htdemucs';
+
+    const modelSel = h('select', {}, SEP_MODELS.filter(m => info.models[m]).map(m => h('option', { value: m, text: t('model_' + m) })));
+    modelSel.value = o.model;
+    const shiftsSel = h('select', {}, SEP_SHIFTS.map(n => h('option', { value: n, text: t('shifts_' + n) })));
+    shiftsSel.value = String(o.shifts);
+    const stemsBox = h('div', { class: 'sep-stems' });
+    const renderStems = () => {
+      stemsBox.innerHTML = '';
+      for (const s of info.models[o.model].stems) {
+        const cb = h('input', { type: 'checkbox', checked: !o.stems || o.stems.includes(s) });
+        cb.addEventListener('change', () => {
+          o.stems = [...stemsBox.querySelectorAll('input')].filter(x => x.checked).map(x => x.dataset.stem);
+        });
+        cb.dataset.stem = s;
+        stemsBox.append(h('label', { class: 'chk' }, cb, h('span', { text: `${t('stem_' + s)} → ${t('role_' + STEM_ROLES[s])}` })));
+      }
+    };
+    modelSel.addEventListener('change', () => { o.model = modelSel.value; o.stems = null; renderStems(); });
+    shiftsSel.addEventListener('change', () => { o.shifts = +shiftsSel.value; });
+    renderStems();
+
+    const optBox = (key, label) => {
+      const cb = h('input', { type: 'checkbox', checked: o[key] });
+      cb.addEventListener('change', () => { o[key] = cb.checked; });
+      return h('label', { class: 'chk' }, cb, h('span', { text: label }));
+    };
+    const device = info.device === 'cuda' && info.gpu ? `GPU (${info.gpu})` : info.device;
+
+    body.append(
+      h('p', {}, t('sepSource'), ' ', h('strong', { text: tr.name }), h('span', { class: 'hint', text: ` · ${tr.buffer.duration.toFixed(1)} s` })),
+      h('div', { class: 'sep-form' },
+        h('label', {}, h('span', { class: 'lbl', text: t('sepModel') }), modelSel),
+        h('label', {}, h('span', { class: 'lbl', text: t('sepQuality') }), shiftsSel)),
+      h('p', { class: 'hint', text: t('modelDesc_' + o.model) }),
+      h('h4', { text: t('sepStems') }),
+      stemsBox,
+      h('h4', { text: t('sepAfter') }),
+      h('div', { class: 'sep-stems' },
+        optBox('muteOriginal', t('sepMuteOriginal')),
+        optBox('autoMix', t('sepAutoMix', { genre: L(genreDef().name) }))),
+      h('p', { class: 'hint', text: t('sepDevice', { device }) + (info.device === 'cpu' ? ' ' + t('sepCpuWarn') : '') }),
+      h('p', { class: 'hint', text: t('sepFirstUse') }),
+      h('div', { class: 'btn-row' }, h('button', { class: 'btn accent', onclick: () => startSeparation(tr) }, '✦ ' + t('sepStart'))));
+    modelSel.addEventListener('change', () => renderSeparationDialog());
+  }
+
+  function updateSepProgress() {
+    const sj = S.sepJob;
+    const badge = $('#sepBadge');
+    if (!sj) { badge.textContent = ''; return; }
+    const job = sj.job;
+    const pct = Math.round((job.progress || 0) * 100);
+    badge.textContent = ` ${pct}%`;
+    const bar = $('#sepBar'), stage = $('#sepStage'), pctEl = $('#sepPct');
+    if (!bar) return;
+    bar.style.transform = `scaleX(${job.progress || 0})`;
+    pctEl.textContent = pct + '%';
+    stage.textContent = job.status === 'uploading' ? t('sepUploading')
+      : job.status === 'queued' ? t('sepQueued', { n: job.queuePosition || 1 })
+        : t('stage_' + (job.stage || 'starting'));
+  }
+
+  async function startSeparation(tr) {
+    const o = S.sepOpts;
+    const all = S.separation.models[o.model].stems;
+    const stems = (o.stems || all).filter(s => all.includes(s));
+    if (!stems.length) { toast(t('sepNoStems')); return; }
+    S.sepJob = { trackId: tr.id, trackName: tr.name, opts: clone(o), stems, job: { status: 'uploading', progress: 0 } };
+    renderSeparationDialog();
+    try {
+      const audioId = await ensureUploaded(tr);
+      S.sepJob.job = await API.startSeparation(audioId, o.model, o.shifts, stems);
+      pollSeparation();
+    } catch (e) {
+      S.sepJob = null;
+      updateSepProgress();
+      renderSeparationDialog();
+      toast(t('serverError', { msg: e.message }), 6000);
+    }
+  }
+
+  async function cancelSeparation() {
+    const sj = S.sepJob;
+    if (!sj || !sj.job.id) return;
+    try { await API.cancelSeparationJob(sj.job.id); } catch (e) { /* the next poll reports the final state */ }
+  }
+
+  async function pollSeparation() {
+    const sj = S.sepJob;
+    if (!sj) return;
+    try {
+      sj.job = await API.getSeparationJob(sj.job.id);
+    } catch (e) {
+      if (e.status !== 404) { setTimeout(pollSeparation, 2000); return; } // transient network error
+      sj.job = { status: 'error', error: t('sepLost') };
+    }
+    updateSepProgress();
+    if (sj.job.status === 'queued' || sj.job.status === 'running') {
+      setTimeout(pollSeparation, 1000);
+      return;
+    }
+    if (sj.job.status === 'done') {
+      try {
+        await importStems(sj);
+        $('#sepDlg').close();
+      } catch (e) {
+        console.error(e);
+        toast(t('serverError', { msg: e.message }), 6000);
+      }
+    } else if (sj.job.status === 'cancelled') {
+      toast(t('sepCancelled'));
+    } else {
+      toast(t('sepFailed', { msg: sj.job.error || '?' }), 8000);
+    }
+    S.sepJob = null;
+    updateSepProgress();
+    renderSeparationDialog();
+  }
+
+  // Add the separated stems as new tracks aligned with the source track.
+  async function importStems(sj) {
+    const src = S.tracks.find(x => x.id === sj.trackId) || null;
+    const stems = sj.job.stems;
+    const created = [];
+    for (let i = 0; i < stems.length; i++) {
+      const stem = stems[i];
+      toast(t('downloadingAudio', { i: i + 1, n: stems.length }), 60000);
+      const buf = await S.ctx.decodeAudioData(await API.fetchAudio(stem.audioId));
+      const at = src ? S.tracks.indexOf(src) + 1 + i : S.tracks.length;
+      const nt = createTrack(`${sj.trackName} – ${t('stem_' + stem.name)}`, STEM_ROLES[stem.name] || 'other', at);
+      if (src) {
+        // Same edits as the source clip; stems have the same length as the source audio.
+        for (const k of CLIP_KEYS) nt[k] = clone(src[k]);
+        nt.keepClip = true;
+      }
+      setTrackBuffer(nt, buf, `${safeName(sj.trackName)} - ${stem.name}.flac`);
+      nt.audioId = stem.audioId;
+      created.push(nt);
+    }
+    if (sj.opts.autoMix) {
+      for (const nt of created) {
+        for (const m of ['eq', 'comp', 'fx', 'pan', 'volume']) autoModule(nt, m);
+        applyChannel(nt);
+      }
+    }
+    if (src && sj.opts.muteOriginal) src.mute = true;
+    updateAudibility();
+    if (created.length) S.selectedId = created[0].id;
+    renderAll();
+    restartSoon();
+    toast(t('sepDone', { n: created.length }), 5000);
   }
 
   /* ---------- Export ---------- */
@@ -1433,6 +1670,12 @@
       h('button', { class: 'btn small', onclick: () => normalizeTrack(tr), disabled: !tr.buffer, title: t('normalizeTip') }, t('normalize')),
       h('button', { class: 'btn small', onclick: () => reverseTrack(tr), disabled: !tr.buffer }, t('reverse')),
       h('button', { class: 'btn small', onclick: () => splitTrack(tr), disabled: !tr.buffer, title: t('splitTip') }, t('split')),
+      S.server ? h('button', {
+        class: 'btn small ai',
+        onclick: () => openSeparationDialog(tr),
+        disabled: !tr.buffer || !!S.sepJob,
+        title: S.separation && !S.separation.available ? S.separation.reason : t('sepTip'),
+      }, '✦ ' + t('separateBtn')) : null,
       h('button', { class: 'btn small', onclick: () => { const c = duplicateTrack(tr, t('copySuffix')); S.selectedId = c.id; renderAll(); } }, t('duplicate')),
       h('button', { class: 'btn small', onclick: () => moveTrack(tr, -1), title: t('moveUp') }, '▲'),
       h('button', { class: 'btn small', onclick: () => moveTrack(tr, 1), title: t('moveDown') }, '▼'),
@@ -1823,6 +2066,8 @@
     $('#btnExport').addEventListener('click', exportMix);
     $('#btnServerSave').addEventListener('click', saveToServer);
     $('#btnServerOpen').addEventListener('click', openProjectsDialog);
+    $('#btnSeparate').addEventListener('click', separateButton);
+    $('#btnSepClose').addEventListener('click', () => $('#sepDlg').close());
     $('#btnProjectsClose').addEventListener('click', () => $('#projectsDlg').close());
     $('#serverStatus').addEventListener('click', checkServer);
     $('#btnAutoMix').addEventListener('click', autoMixAll);

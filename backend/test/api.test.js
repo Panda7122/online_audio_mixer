@@ -14,6 +14,13 @@ test.before(async () => {
   storageDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oam-test-'));
   const app = await createApp({
     storageDir, serveFrontend: false, frontendDir: '', corsOrigins: [], maxUploadMb: 1, maxJsonMb: 1,
+    separator: {
+      python: process.execPath, // run the fake worker with node
+      script: path.join(__dirname, 'fake-separator.js'),
+      modelsDir: storageDir,
+      device: 'auto',
+      timeoutMin: 1,
+    },
   });
   await new Promise(resolve => { server = app.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
@@ -90,6 +97,39 @@ test('validation and errors', async () => {
   const big = new FormData();
   big.append('file', new Blob([Buffer.alloc(2 * 1024 * 1024)], { type: 'audio/wav' }), 'big.wav');
   assert.equal((await fetch(`${base}/api/audio`, { method: 'POST', body: big })).status, 413);
+});
+
+async function waitForJob(id) {
+  for (let i = 0; i < 100; i++) {
+    const job = await (await fetch(`${base}/api/separation/jobs/${id}`)).json();
+    if (!['queued', 'running'].includes(job.status)) return job;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  throw new Error('job did not finish');
+}
+
+test('source separation jobs', async () => {
+  const info = await (await fetch(`${base}/api/separation`)).json();
+  assert.equal(info.available, true);
+  assert.deepEqual(info.models.htdemucs_6s.stems.length, 6);
+
+  const audio = await (await uploadWav('Song.wav')).json();
+  const start = await fetch(`${base}/api/separation/jobs`, json('POST', { audioId: audio.id, model: 'htdemucs', stems: ['vocals', 'drums'] }));
+  assert.equal(start.status, 202);
+  const job = await waitForJob((await start.json()).id);
+  assert.equal(job.status, 'done', job.error);
+  assert.deepEqual(job.stems.map(s => s.name), ['vocals', 'drums']);
+  const stem = await fetch(`${base}${job.stems[0].url}`);
+  assert.equal(stem.status, 200);
+  assert.equal(Buffer.from(await stem.arrayBuffer()).length, tinyWav().length);
+
+  // Validation
+  const post = body => fetch(`${base}/api/separation/jobs`, json('POST', body));
+  assert.equal((await post({ audioId: audio.id, model: 'nope' })).status, 400);
+  assert.equal((await post({ audioId: audio.id, shifts: 0 })).status, 400);
+  assert.equal((await post({ audioId: audio.id, model: 'htdemucs', stems: ['guitar'] })).status, 400);
+  assert.equal((await post({ audioId: '00000000-0000-4000-8000-000000000000' })).status, 404);
+  assert.equal((await fetch(`${base}/api/separation/jobs/unknown`)).status, 404);
 });
 
 test('strip presets', async () => {

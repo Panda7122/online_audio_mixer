@@ -145,6 +145,22 @@ class Storage {
     return meta;
   }
 
+  // Move a file produced on the server (e.g. a separated stem) into audio storage.
+  async importAudioFile(srcPath, { name, mimeType }) {
+    const id = crypto.randomUUID();
+    const fileName = id + path.extname(srcPath).toLowerCase();
+    const dest = path.join(this.audioDir, fileName);
+    try {
+      await fs.rename(srcPath, dest);
+    } catch (e) {
+      if (e.code !== 'EXDEV') throw e;
+      await fs.copyFile(srcPath, dest); // different file system
+      await fs.unlink(srcPath);
+    }
+    const { size } = await fs.stat(dest);
+    return this.addAudio({ id, fileName, originalName: name, mimeType, size });
+  }
+
   async getAudio(id) {
     const meta = await readJson(this.audioMetaFile(id));
     if (!meta) throw new NotFoundError('Audio');

@@ -315,6 +315,24 @@ body.server-offline .server-only { display: none; }
 .project-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .project-info strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ---------- AI source separation ---------- */
+.btn.ai { color: #c9b8ff; border-color: rgba(155, 140, 255, .45); }
+.btn.ai:hover:not(:disabled) { background: rgba(155, 140, 255, .16); }
+#sepBadge { font-family: var(--mono); font-size: 11px; }
+.sep-dlg { width: min(620px, calc(100vw - 32px)); }
+.sep-dlg h4 { margin: 14px 0 6px; font-size: 13px; }
+.sep-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.sep-form label { display: flex; flex-direction: column; gap: 4px; }
+.sep-form .lbl { color: var(--muted); font-size: 12px; }
+.sep-stems { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.sep-progress { height: 10px; background: #07090c; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 12px; }
+.sep-bar { height: 100%; background: linear-gradient(90deg, #9b8cff, var(--accent)); transform-origin: left; transform: scaleX(0); transition: transform .4s; }
+.sep-status { display: flex; justify-content: space-between; margin: 6px 0 14px; color: var(--muted); }
+.mono { font-family: var(--mono); }
+pre.code { background: #07090c; border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; font: 12px var(--mono); overflow-x: auto; }
+.help-body .btn-row { margin-top: 14px; }
+@media (max-width: 760px) { .sep-form { grid-template-columns: 1fr; } }
+
 /* ---------- Overlays ---------- */
 .drop-overlay {
   position: fixed; inset: 0; z-index: 50; display: none; place-items: center;

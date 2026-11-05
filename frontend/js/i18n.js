@@ -160,6 +160,51 @@ const I18N = {
     confirmDeleteMyPreset: 'Delete personal preset "{name}"?',
     fileTooLarge: '"{name}" is larger than the server limit ({mb} MB).',
 
+    separateBtn: 'AI source separation',
+    sepTitle: 'AI source separation (HTDemucs)',
+    sepTip: 'Split this track into vocals, drums, bass and more with HTDemucs',
+    sepSource: 'Source track:',
+    sepModel: 'Model',
+    sepQuality: 'Quality',
+    model_htdemucs: 'HTDemucs – 4 stems (fast)',
+    model_htdemucs_ft: 'HTDemucs fine-tuned – 4 stems (best quality, ~4× slower)',
+    model_htdemucs_6s: 'HTDemucs 6 stems – adds guitar & piano',
+    modelDesc_htdemucs: 'Hybrid Transformer Demucs. Separates vocals, drums, bass and other. Good default.',
+    modelDesc_htdemucs_ft: 'Four fine-tuned models, one per stem. Cleaner results but takes about four times longer.',
+    modelDesc_htdemucs_6s: 'Also separates guitar and piano. The piano stem is less reliable.',
+    shifts_1: 'Standard (1 pass)',
+    shifts_2: 'High (2 passes)',
+    shifts_5: 'Maximum (5 passes, slow)',
+    sepStems: 'Stems to import',
+    stem_vocals: 'Vocals', stem_drums: 'Drums', stem_bass: 'Bass', stem_other: 'Other', stem_guitar: 'Guitar', stem_piano: 'Piano',
+    sepAfter: 'After separation',
+    sepMuteOriginal: 'Mute the original track',
+    sepAutoMix: 'Auto-mix the new tracks ({genre} template)',
+    sepDevice: 'Processing device: {device}.',
+    sepCpuWarn: 'No GPU found, so separation runs on the CPU and can take several minutes per song.',
+    sepFirstUse: 'The first use of each model downloads its weights (about 80 MB, or 320 MB for the fine-tuned model).',
+    sepStart: 'Start separation',
+    sepRunningFor: 'Separating',
+    sepBackground: 'Run in background',
+    sepChecking: 'Checking the separation engine on the server…',
+    sepUnavailable: 'Source separation is not available on the server.',
+    sepNeedTrack: 'Select a track that has audio first.',
+    retry: 'Retry',
+    cancel: 'Cancel',
+    sepUploading: 'Uploading audio to the server…',
+    sepQueued: 'Waiting in queue (position {n})…',
+    stage_starting: 'Starting…',
+    stage_loading_model: 'Loading model (downloaded on first use)…',
+    stage_decoding: 'Decoding audio…',
+    stage_separating: 'Separating sources…',
+    stage_encoding: 'Saving stems…',
+    stage_done: 'Done',
+    sepNoStems: 'Select at least one stem.',
+    sepLost: 'The job was lost (the server may have restarted).',
+    sepCancelled: 'Separation cancelled.',
+    sepFailed: 'Separation failed: {msg}',
+    sepDone: 'Separation finished: added {n} stem track(s).',
+
     helpHtml: `
 <section>
   <h3>1. Quick start</h3>
@@ -249,7 +294,17 @@ const I18N = {
   </ul>
 </section>
 <section>
-  <h3>13. Keyboard shortcuts</h3>
+  <h3>13. AI source separation (HTDemucs)</h3>
+  <ul>
+    <li>Splits a mixed song into separate stems: vocals, drums, bass and other (the 6-stem model adds guitar and piano). Runs on the server, using the GPU when available.</li>
+    <li>Select a track and click <b>✦ AI source separation</b> (toolbar or Track card). With no track selected, the toolbar button asks for a file first.</li>
+    <li>Choose a <b>model</b> and <b>quality</b> (more passes = slightly cleaner, slower) and the stems to import. Each stem becomes a new track with the right role, aligned with the source and with the same trims and fades.</li>
+    <li>Options: mute the original track, and auto-mix the new tracks with the current genre template. You can close the dialog while it runs: the toolbar button shows the progress.</li>
+    <li>Typical uses: karaoke / instrumental versions, remixing, re-balancing a finished mix, or applying separate EQ and compression to the vocal.</li>
+  </ul>
+</section>
+<section>
+  <h3>14. Keyboard shortcuts</h3>
   <table>
     <tr><td><kbd>Space</kbd></td><td>Play / pause</td></tr>
     <tr><td><kbd>Home</kbd></td><td>Go to start</td></tr>
@@ -422,6 +477,51 @@ const I18N = {
     confirmDeleteMyPreset: '確定要刪除個人預設「{name}」嗎？',
     fileTooLarge: '「{name}」超過伺服器的大小上限（{mb} MB）。',
 
+    separateBtn: 'AI 音源分離',
+    sepTitle: 'AI 音源分離（HTDemucs）',
+    sepTip: '用 HTDemucs 把此音軌分離成人聲、鼓、貝斯等',
+    sepSource: '來源音軌：',
+    sepModel: '模型',
+    sepQuality: '品質',
+    model_htdemucs: 'HTDemucs－4 軌（快速）',
+    model_htdemucs_ft: 'HTDemucs 微調版－4 軌（最佳品質，約慢 4 倍）',
+    model_htdemucs_6s: 'HTDemucs 6 軌－增加吉他與鋼琴',
+    modelDesc_htdemucs: 'Hybrid Transformer Demucs，分離人聲、鼓、貝斯與其他。建議的預設選項。',
+    modelDesc_htdemucs_ft: '每個音軌各用一個微調模型，結果較乾淨，但時間約為 4 倍。',
+    modelDesc_htdemucs_6s: '另外分離吉他與鋼琴。鋼琴音軌的效果較不穩定。',
+    shifts_1: '標準（1 次）',
+    shifts_2: '高（2 次）',
+    shifts_5: '最高（5 次，較慢）',
+    sepStems: '要匯入的分軌',
+    stem_vocals: '人聲', stem_drums: '鼓', stem_bass: '貝斯', stem_other: '其他', stem_guitar: '吉他', stem_piano: '鋼琴',
+    sepAfter: '分離完成後',
+    sepMuteOriginal: '將原始音軌靜音',
+    sepAutoMix: '自動混音新的音軌（{genre} 範本）',
+    sepDevice: '運算裝置：{device}。',
+    sepCpuWarn: '沒有偵測到 GPU，分離會使用 CPU 執行，每首歌可能需要數分鐘。',
+    sepFirstUse: '每個模型第一次使用時會下載權重（約 80 MB，微調版約 320 MB）。',
+    sepStart: '開始分離',
+    sepRunningFor: '正在分離',
+    sepBackground: '在背景執行',
+    sepChecking: '正在檢查伺服器的分離引擎…',
+    sepUnavailable: '伺服器目前無法使用音源分離。',
+    sepNeedTrack: '請先選取一條有音訊的音軌。',
+    retry: '重試',
+    cancel: '取消',
+    sepUploading: '正在上傳音訊到伺服器…',
+    sepQueued: '排隊中（第 {n} 位）…',
+    stage_starting: '啟動中…',
+    stage_loading_model: '載入模型中（第一次使用會下載）…',
+    stage_decoding: '解碼音訊中…',
+    stage_separating: '分離音源中…',
+    stage_encoding: '儲存分軌中…',
+    stage_done: '完成',
+    sepNoStems: '請至少選擇一個分軌。',
+    sepLost: '找不到這個工作（伺服器可能已重新啟動）。',
+    sepCancelled: '已取消音源分離。',
+    sepFailed: '音源分離失敗：{msg}',
+    sepDone: '音源分離完成：已新增 {n} 條分軌。',
+
     helpHtml: `
 <section>
   <h3>1. 快速開始</h3>
@@ -511,7 +611,17 @@ const I18N = {
   </ul>
 </section>
 <section>
-  <h3>13. 快捷鍵</h3>
+  <h3>13. AI 音源分離（HTDemucs）</h3>
+  <ul>
+    <li>把混好的歌曲分離成獨立分軌：人聲、鼓、貝斯、其他（6 軌模型會再分出吉他與鋼琴）。分離在伺服器上執行，有 GPU 時會使用 GPU。</li>
+    <li>選取一條音軌後按 <b>✦ AI 音源分離</b>（工具列或「音軌與編輯」卡片）。沒有選取音軌時，工具列按鈕會先請你選擇檔案。</li>
+    <li>選擇<b>模型</b>與<b>品質</b>（次數越多會略為乾淨，但較慢），以及要匯入的分軌。每個分軌會成為一條新音軌，自動設定角色，並與來源對齊、沿用相同的修剪與淡入淡出。</li>
+    <li>選項：將原始音軌靜音、用目前的曲風範本自動混音新音軌。執行期間可以關閉視窗，工具列按鈕會顯示進度。</li>
+    <li>常見用途：製作卡拉 OK／伴奏、重新混音、調整成品混音的比例，或單獨對人聲做 EQ 與壓縮。</li>
+  </ul>
+</section>
+<section>
+  <h3>14. 快捷鍵</h3>
   <table>
     <tr><td><kbd>空白鍵</kbd></td><td>播放／暫停</td></tr>
     <tr><td><kbd>Home</kbd></td><td>回到開頭</td></tr>

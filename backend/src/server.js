@@ -9,6 +9,8 @@ const { Storage } = require('./storage');
 const projectsRouter = require('./routes/projects');
 const audioRouter = require('./routes/audio');
 const presetsRouter = require('./routes/presets');
+const separationRouter = require('./routes/separation');
+const { SeparationService } = require('./separation');
 
 async function createApp(cfg = config) {
   const storage = new Storage(cfg.storageDir);
@@ -28,6 +30,7 @@ async function createApp(cfg = config) {
   app.use('/api/projects', projectsRouter(storage));
   app.use('/api/audio', audioRouter(storage, cfg));
   app.use('/api/strip-presets', presetsRouter(storage));
+  app.use('/api/separation', separationRouter(new SeparationService(storage, cfg.separator)));
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
   if (cfg.serveFrontend) app.use(express.static(cfg.frontendDir));

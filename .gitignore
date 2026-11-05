@@ -1,4 +1,7 @@
 node_modules/
 backend/storage/
+backend/separator/.venv/
+backend/separator/models/
+__pycache__/
 *.log
 .DS_Store

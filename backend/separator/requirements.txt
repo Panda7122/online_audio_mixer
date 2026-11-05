@@ -1,0 +1,6 @@
+# Python dependencies of the HTDemucs separation worker.
+# torch / torchaudio come from the PyTorch index chosen in setup.sh (CUDA or CPU build).
+torch==2.8.0
+torchaudio==2.8.0
+demucs==4.0.1
+numpy>=1.24

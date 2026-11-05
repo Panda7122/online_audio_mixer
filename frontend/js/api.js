@@ -66,7 +66,12 @@
       return res.arrayBuffer();
     },
 
-    listStripPresets: () => request('/strip-presets').then(r => r.presets),
+    separationInfo: (refresh) => request('/separation' + (refresh ? '?refresh=1' : '')),
+    startSeparation: (audioId, model, shifts, stems) => request('/separation/jobs', jsonOpts('POST', { audioId, model, shifts, stems })),
+    getSeparationJob: id => request('/separation/jobs/' + encodeURIComponent(id)),
+    cancelSeparationJob: id => request('/separation/jobs/' + encodeURIComponent(id), { method: 'DELETE' }),
+
+    listStripPresets:() => request('/strip-presets').then(r => r.presets),
     createStripPreset: (name, role, strip) => request('/strip-presets', jsonOpts('POST', { name, role, strip })),
     deleteStripPreset: id => request('/strip-presets/' + encodeURIComponent(id), { method: 'DELETE' }),
   };
