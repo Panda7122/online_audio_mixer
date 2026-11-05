@@ -41,6 +41,7 @@
     <div class="group files">
       <button id="btnAddAudio" class="btn">+ <span data-i18n="addAudio"></span></button>
       <button id="btnAddEmpty" class="btn" data-i18n="addEmpty"></button>
+      <select id="addInstrument" class="btn-select" aria-label="Add instrument track"></select>
       <button id="btnSave" class="btn" data-i18n="saveSettings"></button>
       <button id="btnLoad" class="btn" data-i18n="loadSettings"></button>
       <button id="btnExport" class="btn accent" data-i18n="exportWav"></button>
@@ -49,6 +50,23 @@
       <button id="btnServerSave" class="btn" data-i18n="saveToServer"></button>
       <button id="btnServerOpen" class="btn" data-i18n="openFromServer"></button>
       <button id="btnSeparate" class="btn ai">✦ <span data-i18n="separateBtn"></span><span id="sepBadge"></span></button>
+    </div>
+    <div class="group edit-tools">
+      <div class="seg" role="group">
+        <button id="toolMove" class="btn small on" data-i18n-title="toolMoveTip">✥ <span data-i18n="toolMove"></span></button>
+        <button id="toolRange" class="btn small" data-i18n-title="toolRangeTip">⬚ <span data-i18n="toolRange"></span></button>
+      </div>
+      <div class="seg" role="group">
+        <button id="btnCut" class="btn small" data-i18n-title="cutTip">✂</button>
+        <button id="btnCopy" class="btn small" data-i18n-title="copyTip">⧉</button>
+        <button id="btnPaste" class="btn small">⎘</button>
+        <button id="btnDeleteSel" class="btn small" data-i18n-title="deleteSelTip">⌫</button>
+        <button id="btnCrop" class="btn small" data-i18n-title="cropTip">⊡</button>
+      </div>
+      <div class="seg" role="group">
+        <button id="btnUndo" class="btn small">↶</button>
+        <button id="btnRedo" class="btn small">↷</button>
+      </div>
     </div>
     <div class="group master">
       <span class="lbl" data-i18n="master"></span>
@@ -97,6 +115,15 @@
     <div id="projectsBody" class="help-body"></div>
   </dialog>
 
+  <!-- Per-bar note editor for instrument tracks -->
+  <dialog id="noteDlg" class="help note-dlg">
+    <div class="help-head">
+      <h2><span data-i18n="noteEditor"></span> · <span id="noteTitle"></span></h2>
+      <button class="btn icon" id="btnNoteClose" aria-label="Close">✕</button>
+    </div>
+    <div id="noteBody" class="note-body"></div>
+  </dialog>
+
   <!-- HTDemucs source separation -->
   <dialog id="sepDlg" class="help sep-dlg">
     <div class="help-head">
@@ -117,6 +144,9 @@
   <script src="js/i18n.js"></script>
   <script src="js/presets.js"></script>
   <script src="js/dsp.js"></script>
+  <script src="js/synth.js"></script>
+  <script src="js/sampler.js"></script>
+  <script src="js/noteeditor.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

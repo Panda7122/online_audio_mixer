@@ -358,6 +358,42 @@
     return out;
   };
 
+  /* ---------- Non-destructive buffer editing helpers (always return new buffers) ---------- */
+
+  // Copy samples [s0, s1) into a new buffer.
+  DSP.sliceBuffer = function (ctx, buffer, s0, s1) {
+    s0 = clamp(Math.round(s0), 0, buffer.length);
+    s1 = clamp(Math.round(s1), s0 + 1, Math.max(s0 + 1, buffer.length));
+    const out = ctx.createBuffer(buffer.numberOfChannels, s1 - s0, buffer.sampleRate);
+    for (let c = 0; c < buffer.numberOfChannels; c++) {
+      out.getChannelData(c).set(buffer.getChannelData(c).subarray(s0, Math.min(s1, buffer.length)));
+    }
+    return out;
+  };
+
+  /*
+   * Build a new buffer of `length` samples from parts [{ buffer, at }] (later parts overwrite earlier ones)
+   * and silent ranges [[s0, s1], ...]. Mono parts are copied to every output channel.
+   */
+  DSP.composeBuffer = function (ctx, length, sampleRate, parts, silences) {
+    const nch = Math.max(1, ...parts.map(p => p.buffer.numberOfChannels));
+    const out = ctx.createBuffer(nch, Math.max(1, Math.round(length)), sampleRate);
+    for (const { buffer, at } of parts) {
+      const start = Math.round(at);
+      for (let c = 0; c < nch; c++) {
+        const src = buffer.getChannelData(Math.min(c, buffer.numberOfChannels - 1));
+        const dst = out.getChannelData(c);
+        const from = Math.max(0, -start);
+        const to = Math.min(src.length, dst.length - start);
+        if (to > from) dst.set(src.subarray(from, to), start + from);
+      }
+    }
+    for (const [s0, s1] of silences || []) {
+      for (let c = 0; c < nch; c++) out.getChannelData(c).fill(0, clamp(Math.round(s0), 0, out.length), clamp(Math.round(s1), 0, out.length));
+    }
+    return out;
+  };
+
   // Encode an AudioBuffer as a 16-bit PCM WAV blob.
   DSP.encodeWav = function (buffer) {
     const nch = buffer.numberOfChannels, sr = buffer.sampleRate, n = buffer.length;

@@ -22,7 +22,8 @@
   ];
   const CLIP_KEYS = ['offset', 'trimStart', 'trimEnd', 'fadeIn', 'fadeOut', 'clipGainDb', 'reversed'];
   const MIX_KEYS = ['volumeDb', 'pan', 'mute', 'solo', 'eq', 'comp', 'reverb', 'delay', 'presetSel'];
-  const TRACK_KEYS = ['name', 'role', 'color', 'fileName', 'audioId', ...CLIP_KEYS, ...MIX_KEYS];
+  const TRACK_KEYS = ['name', 'role', 'color', 'kind', 'instrument', 'notes', 'sampler', 'fileName', 'audioId', ...CLIP_KEYS, ...MIX_KEYS];
+  const MAX_NOTES = 50000;
   const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const STRIP_KEYS = ['volumeDb', 'pan', 'eq', 'comp', 'reverb', 'delay', 'presetSel'];
   const ROLE_PATTERNS = [
@@ -69,6 +70,15 @@
     sepJob: null, // running separation job
     sepTarget: null, // track chosen in the separation dialog
     sepOpts: { model: 'htdemucs', shifts: 1, stems: null, muteOriginal: true, autoMix: true },
+    tool: 'move', // timeline tool: 'move' (move/trim clips) or 'range' (select audio ranges)
+    sel: null, // { trackId, kind: 'notes', b0, b1 (beats) } or { trackId, kind: 'audio', t0, t1 (seconds) }
+    selAnchor: 0,
+    clipboard: null, // { kind: 'notes', len, notes } or { kind: 'audio', buffer }
+    undo: [],
+    redo: [],
+    noteTimer: null,
+    noteCursor: 0,
+    noteEditor: null,
     trackCtrls: [],
     inspCtrls: [],
     eqCanvas: null,
@@ -187,7 +197,7 @@
     };
   }
 
-  function createTrack(name, role, index) {
+  function createTrack(name, role, index, kind) {
     const id = S.nextId++;
     const tr = Object.assign({
       id,
@@ -207,6 +217,10 @@
       keepClip: false,
       source: null, // original File/Blob, uploaded when saving to the server
       audioId: null, // id of the audio on the server
+      kind: kind === 'notes' ? 'notes' : 'audio', // 'audio' clip track or 'notes' instrument track
+      instrument: 'piano',
+      notes: [], // instrument tracks: { t: start beat, d: length in beats, p: MIDI pitch, v: velocity }
+      sampler: defaultSampler(), // uploaded sounds for the custom instruments
       ui: {},
     }, defaultMix());
     tr.channel = new DSP.Channel(S.ctx, S.master.input);
@@ -324,6 +338,7 @@
     stopVoices(tr);
     tr.channel.disconnect();
     S.tracks.splice(S.tracks.indexOf(tr), 1);
+    if (S.sel && S.sel.trackId === tr.id) setSelection(null);
     if (S.selectedId === tr.id) S.selectedId = S.tracks.length ? S.tracks[0].id : null;
     updateAudibility();
     renderAll();
@@ -331,7 +346,8 @@
 
   function duplicateTrack(tr, nameSuffix) {
     const copy = createTrack(tr.name + nameSuffix, tr.role, S.tracks.indexOf(tr) + 1);
-    for (const k of [...CLIP_KEYS, ...MIX_KEYS, 'fileName']) copy[k] = clone(tr[k]);
+    for (const k of [...CLIP_KEYS, ...MIX_KEYS, 'fileName', 'kind', 'instrument', 'notes']) copy[k] = clone(tr[k]);
+    copy.sampler = copySampler(tr.sampler);
     copy.buffer = tr.buffer; // buffers are never mutated, so sharing is safe
     copy.peaks = tr.peaks;
     copy.source = tr.source;
@@ -345,6 +361,7 @@
     if (!tr.buffer) return;
     const pk = DSP.peakDb(tr.buffer, tr.trimStart, tr.trimEnd);
     if (!Number.isFinite(pk)) return;
+    pushUndo(t('normalize'), [tr]);
     tr.clipGainDb = round(clamp(-1 - pk, -24, 24), 2);
     afterClip(tr);
     toast(t('normalized', { db: fmtDb(tr.clipGainDb) }));
@@ -352,6 +369,7 @@
 
   function reverseTrack(tr) {
     if (!tr.buffer) return;
+    pushUndo(t('reverse'), [tr]);
     const d = tr.buffer.duration;
     tr.buffer = DSP.reversed(S.ctx, tr.buffer);
     tr.peaks = DSP.computePeaks(tr.buffer, PEAK_BLOCK);
@@ -483,9 +501,16 @@
     return Math.max(S.startPos, S.startPos + S.ctx.currentTime - S.startCtxTime);
   }
 
+  const beatSec = () => 60 / S.bpm;
+  const barSec = () => 4 * beatSec();
+  const notesEnd = tr => tr.notes.reduce((m, n) => Math.max(m, (n.t + n.d) * beatSec()), 0);
+
   function projectEnd() {
     let end = 0;
-    for (const tr of S.tracks) if (tr.buffer) end = Math.max(end, clipEnd(tr));
+    for (const tr of S.tracks) {
+      if (tr.buffer) end = Math.max(end, clipEnd(tr));
+      else if (tr.kind === 'notes' && tr.notes.length) end = Math.max(end, notesEnd(tr));
+    }
     return end;
   }
 
@@ -497,17 +522,54 @@
     for (const tr of S.tracks) {
       if (!tr.buffer) continue;
       const v = DSP.scheduleClip(S.ctx, tr, tr.channel.input, when, fromPos);
-      if (v) { v.tr = tr; S.voices.push(v); }
+      if (v) {
+        S.voices.push({
+          tr,
+          end: Infinity,
+          stop() {
+            try { v.src.stop(); } catch (e) { /* not started yet */ }
+            v.src.disconnect();
+            v.gain.disconnect();
+          },
+        });
+      }
     }
+    // Instrument tracks are scheduled with a short look-ahead instead of all at once.
+    S.noteCursor = fromPos;
+    scheduleNotes(true);
+    clearInterval(S.noteTimer);
+    S.noteTimer = setInterval(() => scheduleNotes(false), 40);
+  }
+
+  function scheduleNotes(initial) {
+    const now = S.ctx.currentTime;
+    const from = S.noteCursor;
+    const to = Math.max(from, S.startPos + Math.max(0, now - S.startCtxTime) + 0.3);
+    if (to <= from && !initial) return;
+    const spb = beatSec();
+    for (const tr of S.tracks) {
+      if (tr.kind !== 'notes' || !tr.notes.length) continue;
+      for (const n of tr.notes) {
+        const ts = n.t * spb, te = (n.t + n.d) * spb;
+        // First pass also starts notes that are already sounding at the start position.
+        const hit = initial ? ts < to && te > from : ts >= from && ts < to;
+        if (!hit) continue;
+        const start = Math.max(ts, from);
+        const v = Synth.play(S.ctx, tr.channel.input, tr.instrument, n.p, n.v, S.startCtxTime + (start - S.startPos), Math.max(0.02, te - start), tr.sampler);
+        v.tr = tr;
+        S.voices.push(v);
+      }
+    }
+    S.noteCursor = to;
+    if (S.voices.length > 256) S.voices = S.voices.filter(v => v.end > now - 0.5);
   }
 
   // Stop all voices, or only the ones belonging to `onlyTrack`.
   function stopVoices(onlyTrack) {
+    if (!onlyTrack) clearInterval(S.noteTimer);
     S.voices = S.voices.filter(v => {
       if (onlyTrack && v.tr !== onlyTrack) return true;
-      try { v.src.stop(); } catch (e) { /* not started yet */ }
-      v.src.disconnect();
-      v.gain.disconnect();
+      v.stop();
       return false;
     });
   }
@@ -588,7 +650,7 @@
     }
     await S.ctx.resume();
     let target = selected();
-    if (!target || target.buffer) {
+    if (!target || target.buffer || target.kind !== 'audio') {
       target = createTrack(t('recordingName', { n: ++S.recCount }), 'vocal');
     }
     S.selectedId = target.id;
@@ -661,7 +723,7 @@
   /* ---------- Save / load ---------- */
   function serializeTrack(tr, keys) {
     const o = {};
-    for (const k of keys) o[k] = clone(tr[k]);
+    for (const k of keys) o[k] = k === 'sampler' ? serializeSampler(tr.sampler) : clone(tr[k]);
     return o;
   }
 
@@ -710,6 +772,10 @@
     if (!tr.buffer && typeof o.audioId === 'string' && ID_RE.test(o.audioId)) tr.audioId = o.audioId;
     tr.mute = !!o.mute;
     tr.solo = !!o.solo;
+    tr.kind = o.kind === 'notes' && !tr.buffer ? 'notes' : 'audio';
+    if (Synth.INSTRUMENTS[o.instrument]) tr.instrument = o.instrument;
+    tr.notes = sanitizeNotes(o.notes);
+    tr.sampler = parseSampler(o.sampler, tr.sampler);
     const wantReversed = !!o.reversed;
     if (tr.buffer && wantReversed !== tr.reversed) {
       tr.buffer = DSP.reversed(S.ctx, tr.buffer);
@@ -759,9 +825,10 @@
     syncGlobalControls();
     if (!selected() && S.tracks.length) S.selectedId = S.tracks[0].id;
     renderAll();
-    if (assigned.some(x => !x.buffer && x.audioId)) await fetchMissingAudio();
-    const missing = assigned.filter(x => !x.buffer).length;
-    toast(missing ? t('settingsLoadedMissing', { n: missing }) : t('settingsLoaded'), 4500);
+    if (assigned.some(x => (!x.buffer && x.audioId) || x.sampler.zones.some(z => !z.buffer && z.audioId))) await fetchMissingAudio();
+    const missing = assigned.filter(x => x.kind === 'audio' && !x.buffer).length;
+    const missingSamples = assigned.reduce((a, x) => a + x.sampler.zones.filter(z => !z.buffer).length, 0);
+    toast((missing ? t('settingsLoadedMissing', { n: missing }) : t('settingsLoaded')) + (missingSamples ? ' ' + t('samplesMissing', { n: missingSamples }) : ''), 6000);
   }
 
   function loadStrip(tr, o) {
@@ -835,7 +902,17 @@
         tr.audioId = null;
       }
     }
-    if (todo.length) renderAll();
+    const zones = S.tracks.flatMap(x => x.sampler.zones.filter(z => !z.buffer && z.audioId));
+    for (let i = 0; i < zones.length; i++) {
+      toast(t('downloadingSamples', { i: i + 1, n: zones.length }), 60000);
+      try {
+        setZoneBuffer(zones[i], await S.ctx.decodeAudioData(await API.fetchAudio(zones[i].audioId)));
+      } catch (e) {
+        console.error(e);
+        zones[i].audioId = null;
+      }
+    }
+    if (todo.length || zones.length) renderAll();
   }
 
   // Upload a track's original audio to the server (once) and return its audio id.
@@ -867,6 +944,7 @@
         toast(t('uploadingAudio', { i: i + 1, n: pending.length }), 60000);
         await ensureUploaded(pending[i]);
       }
+      await uploadSamples();
       const settings = buildSettings();
       // Same name = update the open project; a new name = save as a new project.
       let saved = null;
@@ -893,6 +971,10 @@
     S.tracks = [];
     S.selectedId = null;
     S.pos = 0;
+    S.sel = null;
+    S.undo = [];
+    S.redo = [];
+    updateEditButtons();
   }
 
   async function openServerProject(id) {
@@ -1206,12 +1288,12 @@
 
   /* ---------- Export ---------- */
   async function exportMix() {
-    const tracks = S.tracks.filter(x => x.buffer);
+    const tracks = S.tracks.filter(x => x.buffer || (x.kind === 'notes' && x.notes.length));
     if (!tracks.length) { toast(t('noTracksToExport')); return; }
     const sr = S.ctx.sampleRate;
-    let end = 0, tail = 0.5;
+    let end = 0, tail = 1;
     for (const tr of tracks) {
-      end = Math.max(end, clipEnd(tr));
+      end = Math.max(end, tr.buffer ? clipEnd(tr) : notesEnd(tr));
       if (tr.reverb.enabled) tail = Math.max(tail, tr.reverb.decay + tr.reverb.preDelay / 1000);
       if (tr.delay.enabled && tr.delay.feedback > 0) {
         const ds = DSP.delaySeconds(tr.delay, S.bpm);
@@ -1227,7 +1309,8 @@
       const ch = new DSP.Channel(off, master.input);
       ch.apply(tr, S.bpm);
       ch.setAudible(!tr.mute && (!anySolo || tr.solo));
-      DSP.scheduleClip(off, tr, ch.input, 0, 0);
+      if (tr.buffer) DSP.scheduleClip(off, tr, ch.input, 0, 0);
+      else for (const n of tr.notes) Synth.play(off, ch.input, tr.instrument, n.p, n.v, n.t * beatSec(), n.d * beatSec(), tr.sampler);
     }
     const btn = $('#btnExport');
     btn.disabled = true;
@@ -1385,6 +1468,7 @@
     for (const tr of S.tracks) inner.append(buildTrackRow(tr, laneW));
     inner.append(h('div', { class: 'playhead', id: 'playhead' }));
     for (const c of S.trackCtrls) c.refresh();
+    updateSelectionOverlay();
     $('#emptyHint').hidden = S.tracks.length > 0;
     positionPlayhead();
   }
@@ -1432,13 +1516,24 @@
     tr.ui = {};
     const rec = S.recording && S.recording.target === tr;
     const row = h('div', { class: 'row track' + (tr.id === S.selectedId ? ' selected' : '') + (rec ? ' recording' : ''), 'data-id': tr.id });
-    const lane = h('div', { class: 'lane', style: laneGridStyle(laneW) });
+    const lane = h('div', { class: 'lane' + (tr.kind === 'notes' ? ' notes-lane' : ''), style: laneGridStyle(laneW) });
+    tr.ui.lane = lane;
     lane.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || e.target.closest('button')) return;
+      if (tr.kind === 'notes') { notesLanePointer(tr, lane, e); return; }
+      if (S.tool === 'range') { rangePointer(tr, lane, e); return; }
       if (e.target !== lane) return;
       selectTrack(tr.id);
+      setSelection(null);
       if (!S.recording) seek((e.clientX - lane.getBoundingClientRect().left) / S.pps);
     });
-    if (rec) {
+    if (tr.kind === 'notes') {
+      lane.addEventListener('dblclick', e => {
+        const bar = Math.floor((e.clientX - lane.getBoundingClientRect().left) / S.pps / barSec());
+        openBarEditor(tr, bar);
+      });
+      buildNotesCells(tr, lane, laneW);
+    } else if (rec) {
       lane.append(h('div', { class: 'lane-msg rec-msg', style: `left:${Math.max(0, S.recording.tlStart) * S.pps}px` }, '● ' + t('recLane')));
     } else if (tr.buffer) {
       lane.append(buildClip(tr));
@@ -1465,7 +1560,9 @@
     const sBtn = h('button', { class: 'ms s', title: t('solo'), onclick: () => { tr.solo = !tr.solo; afterMix(tr); } }, 'S');
     C.push({ refresh() { mBtn.classList.toggle('on', tr.mute); sBtn.classList.toggle('on', tr.solo); } });
 
-    const fileBtn = h('button', { class: 'ms', title: t('loadAudio'), onclick: () => loadAudioIntoTrack(tr) }, '⇪');
+    const fileBtn = tr.kind === 'notes'
+      ? h('button', { class: 'ms', title: t('editBarTip'), onclick: () => openBarEditor(tr, defaultBarFor(tr)) }, '✎')
+      : h('button', { class: 'ms', title: t('loadAudio'), onclick: () => loadAudioIntoTrack(tr) }, '⇪');
     const meter = h('div', { class: 'meter mono' }, h('div', { class: 'bar' }));
     tr.ui.meter = meter.firstChild;
 
@@ -1555,7 +1652,7 @@
 
   function attachClipDrag(tr, clip, hl, hr) {
     clip.addEventListener('pointerdown', e => {
-      if (e.button !== 0) return;
+      if (e.button !== 0 || S.tool === 'range') return; // the lane handles range selection
       e.stopPropagation();
       e.preventDefault();
       selectTrack(tr.id);
@@ -1569,7 +1666,11 @@
       let moved = false;
       const move = ev => {
         const dt = (ev.clientX - x0) / S.pps;
-        if (Math.abs(ev.clientX - x0) > 2) moved = true;
+        if (!moved) {
+          if (Math.abs(ev.clientX - x0) <= 2) return;
+          moved = true;
+          pushUndo(t(mode === 'move' ? 'undoMoveClip' : 'undoTrimClip'), [tr]);
+        }
         if (mode === 'move') {
           tr.offset = Math.max(0, snap(o.offset + dt, ev));
         } else if (mode === 'l') {
@@ -1628,7 +1729,9 @@
         h('button', { class: 'btn small', onclick: () => saveStrip(tr), title: t('saveStripTip') }, t('saveStrip')),
         h('button', { class: 'btn small', onclick: () => openSettingsFile(tr), title: t('loadStripTip') }, t('loadStrip'))),
       h('div', { class: 'cards' },
-        cardTrack(tr), cardMix(tr), cardComp(tr), cardEq(tr), cardReverb(tr), cardDelay(tr)));
+        cardTrack(tr), cardMix(tr), cardComp(tr),
+        tr.kind === 'notes' && Synth.isCustom(tr.instrument) ? cardSampler(tr) : null,
+        cardEq(tr), cardReverb(tr), cardDelay(tr)));
     refreshCtrls();
     requestAnimationFrame(drawEqCurve);
   }
@@ -1659,6 +1762,7 @@
     const top = h('div', { class: 'form-grid' },
       h('label', {}, h('span', { class: 'lbl', text: t('name') }), nameIn),
       h('label', {}, h('span', { class: 'lbl', text: t('role') }), roleSel));
+    if (tr.kind === 'notes') return cardNotesTrack(tr, top);
 
     const info = tr.buffer
       ? `${tr.fileName || ''} · ${tr.buffer.duration.toFixed(2)} s · ${tr.buffer.numberOfChannels === 1 ? t('mono') : t('stereo')} · ${tr.buffer.sampleRate} Hz`
@@ -1667,6 +1771,7 @@
     const actions = h('div', { class: 'btn-row' },
       h('button', { class: 'btn small', onclick: () => loadAudioIntoTrack(tr) }, tr.buffer ? t('replaceAudio') : t('loadAudio')),
       h('button', { class: 'btn small', onclick: () => { S.selectedId = tr.id; toggleRecord(); }, disabled: !!tr.buffer || !!S.recording, title: t('recordHereTip') }, '● ' + t('recordHere')),
+      tr.buffer ? null : h('button', { class: 'btn small', onclick: () => convertToInstrument(tr), title: t('toInstrumentTip') }, '♪ ' + t('toInstrument')),
       h('button', { class: 'btn small', onclick: () => normalizeTrack(tr), disabled: !tr.buffer, title: t('normalizeTip') }, t('normalize')),
       h('button', { class: 'btn small', onclick: () => reverseTrack(tr), disabled: !tr.buffer }, t('reverse')),
       h('button', { class: 'btn small', onclick: () => splitTrack(tr), disabled: !tr.buffer, title: t('splitTip') }, t('split')),
@@ -1997,6 +2102,660 @@
     requestAnimationFrame(frame);
   }
 
+  /* ---------- Instrument (note) tracks ---------- */
+  const NOTE_EPS = 1e-6;
+
+  function sanitizeNotes(list) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const n of list.slice(0, MAX_NOTES)) {
+      if (!n || typeof n !== 'object') continue;
+      const tt = +n.t, d = +n.d, p = Math.round(+n.p), v = Math.round(+n.v);
+      if (!(tt >= 0) || !(d > 0) || !(p >= 0 && p <= 127)) continue;
+      out.push({ t: tt, d: Math.min(d, 64), p, v: clamp(Number.isFinite(v) ? v : 100, 1, 127) });
+    }
+    return out;
+  }
+
+  function addInstrumentTrack(instrument) {
+    const inst = Synth.INSTRUMENTS[instrument] ? instrument : 'piano';
+    const tr = createTrack(L(Synth.INSTRUMENTS[inst].name), Synth.INSTRUMENTS[inst].role, undefined, 'notes');
+    tr.instrument = inst;
+    S.selectedId = tr.id;
+    renderAll();
+    toast(t('instTrackAdded'), 4500);
+  }
+
+  function convertToInstrument(tr) {
+    if (tr.buffer || tr.kind !== 'audio') return;
+    tr.kind = 'notes';
+    tr.instrument = 'piano';
+    tr.notes = [];
+    if (tr.role === 'other') tr.role = Synth.INSTRUMENTS.piano.role;
+    renderAll();
+  }
+
+  function populateInstrumentMenu() {
+    const sel = $('#addInstrument');
+    sel.innerHTML = '';
+    sel.append(h('option', { value: '', text: '+ ' + t('addInstrument') }));
+    for (const [id, def] of Object.entries(Synth.INSTRUMENTS)) sel.append(h('option', { value: id, text: L(def.name) }));
+    sel.value = '';
+  }
+
+  const notesInRange = (tr, b0, b1) => tr.notes.filter(n => n.t >= b0 - NOTE_EPS && n.t < b1 - NOTE_EPS);
+
+  // Bar to open in the editor: the selected bar on this track, else the bar under the playhead.
+  function defaultBarFor(tr) {
+    if (S.sel && S.sel.trackId === tr.id && S.sel.kind === 'notes') return Math.floor(S.sel.b0 / 4);
+    return Math.floor(position() / barSec() + NOTE_EPS);
+  }
+
+  function openBarEditor(tr, bar) {
+    if (tr.kind !== 'notes') return;
+    bar = Math.max(0, bar | 0);
+    selectTrack(tr.id);
+    setSelection({ trackId: tr.id, kind: 'notes', b0: bar * 4, b1: bar * 4 + 4 });
+    S.noteEditor.open(tr, bar);
+  }
+
+  function previewNote(tr, pitch, vel) {
+    S.ctx.resume();
+    Synth.play(S.ctx, tr.channel.input, tr.instrument, pitch, vel, S.ctx.currentTime, Synth.isDrum(tr.instrument) ? 0.1 : 0.4, tr.sampler);
+  }
+
+  // Play one bar of a track (editor preview). Returns { start, duration, stop() }.
+  function playBar(tr, bar) {
+    S.ctx.resume();
+    const start = S.ctx.currentTime + 0.05;
+    const b0 = bar * 4, spb = beatSec();
+    const voices = notesInRange(tr, b0, b0 + 4).map(n =>
+      Synth.play(S.ctx, tr.channel.input, tr.instrument, n.p, n.v, start + (n.t - b0) * spb, n.d * spb, tr.sampler));
+    return { start, duration: barSec(), stop() { voices.forEach(v => v.stop()); } };
+  }
+
+  function onNotesChanged(tr) {
+    tr.notes.sort((a, b) => a.t - b.t || a.p - b.p);
+    redrawNotesLane(tr);
+    refreshCtrls();
+    checkTimelineSize();
+  }
+
+  // Bar cells with a mini piano-roll of each bar.
+  function buildNotesCells(tr, lane, laneW) {
+    lane.querySelectorAll('.bar-cell, .lane-msg').forEach(el => el.remove());
+    const barPx = barSec() * S.pps;
+    const nBars = Math.ceil(laneW / barPx);
+    const drums = Synth.isDrum(tr.instrument);
+    let lo = 48, hi = 72;
+    if (!drums && tr.notes.length) {
+      lo = Math.min(...tr.notes.map(n => n.p)) - 2;
+      hi = Math.max(...tr.notes.map(n => n.p)) + 2;
+      if (hi - lo < 12) { const c = (hi + lo) / 2; lo = Math.floor(c - 6); hi = Math.ceil(c + 6); }
+    }
+    const byBar = new Map();
+    for (const n of tr.notes) {
+      const b = Math.floor(n.t / 4 + NOTE_EPS);
+      if (!byBar.has(b)) byBar.set(b, []);
+      byBar.get(b).push(n);
+    }
+    const frag = document.createDocumentFragment();
+    const dpr = window.devicePixelRatio || 1;
+    for (let b = 0; b < nBars; b++) {
+      const notes = byBar.get(b);
+      const cell = h('div', { class: 'bar-cell' + (notes ? ' has' : ''), style: `left:${b * barPx}px;width:${barPx}px` });
+      if (barPx >= 22) cell.append(h('span', { class: 'bar-num', text: String(b + 1) }));
+      if (notes) {
+        const cv = h('canvas', { class: 'bar-notes' });
+        const w = Math.max(1, Math.round(barPx - 2)), hh = 84;
+        cv.width = Math.round(w * dpr);
+        cv.height = Math.round(hh * dpr);
+        const g = cv.getContext('2d');
+        g.scale(dpr, dpr);
+        g.fillStyle = tr.color;
+        const rows = drums ? Synth.DRUM_KIT.length : hi - lo + 1;
+        const rh = hh / rows;
+        for (const n of notes) {
+          const r = drums ? Synth.DRUM_KIT.findIndex(k => k.p === n.p) : hi - n.p;
+          if (r < 0) continue;
+          const x = ((n.t - b * 4) / 4) * w;
+          const nw = drums ? Math.max(2, w / 32) : Math.max(2, (n.d / 4) * w);
+          g.globalAlpha = 0.45 + (n.v / 127) * 0.55;
+          g.fillRect(x, r * rh, Math.min(nw, w - x), Math.max(2, rh - 1));
+        }
+        cell.append(cv);
+      }
+      frag.append(cell);
+    }
+    lane.append(frag);
+    if (!tr.notes.length) lane.append(h('div', { class: 'lane-msg hint-msg', text: t('notesLaneHint') }));
+  }
+
+  function redrawNotesLane(tr) {
+    if (!tr.ui || !tr.ui.lane || !tr.ui.lane.isConnected) return;
+    buildNotesCells(tr, tr.ui.lane, $('#tlInner').dataset.laneW | 0);
+    updateSelectionOverlay();
+  }
+
+  function cardNotesTrack(tr, top) {
+    const C = S.inspCtrls;
+    const instSel = h('select', { 'aria-label': t('instrument') },
+      Object.entries(Synth.INSTRUMENTS).map(([id, d]) => h('option', { value: id, text: L(d.name) })));
+    instSel.value = tr.instrument;
+    instSel.addEventListener('change', () => {
+      const oldRole = Synth.INSTRUMENTS[tr.instrument].role;
+      tr.instrument = instSel.value;
+      if (tr.role === oldRole) tr.role = Synth.INSTRUMENTS[tr.instrument].role;
+      redrawNotesLane(tr);
+      for (const c of S.trackCtrls) c.refresh();
+      renderInspector();
+      S.noteEditor.refresh();
+    });
+    const info = h('p', { class: 'file-info' });
+    C.push({
+      refresh() {
+        const bars = new Set(tr.notes.map(n => Math.floor(n.t / 4 + NOTE_EPS))).size;
+        info.textContent = t('notesInfo', { n: tr.notes.length, bars });
+      },
+    });
+    const actions = h('div', { class: 'btn-row' },
+      h('button', { class: 'btn small accent', onclick: () => openBarEditor(tr, defaultBarFor(tr)), title: t('editBarTip') }, '✎ ' + t('editBar')),
+      h('button', { class: 'btn small', onclick: () => {
+        if (!tr.notes.length || !confirm(t('confirmClearNotes'))) return;
+        pushUndo(t('clearNotes'), [tr]);
+        tr.notes = [];
+        onNotesChanged(tr);
+      } }, t('clearNotes')),
+      h('button', { class: 'btn small', onclick: () => { const c = duplicateTrack(tr, t('copySuffix')); S.selectedId = c.id; renderAll(); } }, t('duplicate')),
+      h('button', { class: 'btn small', onclick: () => moveTrack(tr, -1), title: t('moveUp') }, '▲'),
+      h('button', { class: 'btn small', onclick: () => moveTrack(tr, 1), title: t('moveDown') }, '▼'),
+      h('button', { class: 'btn small danger', onclick: () => deleteTrack(tr) }, t('delete')));
+    return card(t('trackCard'), { cls: 'card-track' },
+      top,
+      h('label', { class: 'form-grid single' }, h('span', { class: 'lbl', text: t('instrument') }), instSel),
+      info,
+      actions,
+      h('p', { class: 'hint', text: t('notesTrackHint') }));
+  }
+
+  /* ---------- Sampler: user-uploaded instrument sounds ---------- */
+  // Zones: { name, root (MIDI note or drum pad), buffer, start (leading silence s), source (File), audioId }
+  function defaultSampler() {
+    return { attack: 2, release: 300, gainDb: 0, oneShot: false, zones: [] };
+  }
+
+  const copySampler = sm => ({ ...sm, zones: sm.zones.map(z => ({ ...z })) });
+  const sortZones = sm => sm.zones.sort((a, b) => a.root - b.root);
+
+  function serializeSampler(sm) {
+    return {
+      attack: sm.attack,
+      release: sm.release,
+      gainDb: sm.gainDb,
+      oneShot: sm.oneShot,
+      zones: sm.zones.map(z => ({ name: z.name, root: z.root, audioId: z.audioId || null })),
+    };
+  }
+
+  // Read sampler settings from a file; keep already-loaded audio for zones that are still the same.
+  function parseSampler(o, existing) {
+    if (!o || typeof o !== 'object') return existing || defaultSampler();
+    const num = (v, a, b, d) => (Number.isFinite(+v) ? clamp(+v, a, b) : d);
+    const old = existing ? existing.zones : [];
+    const zones = (Array.isArray(o.zones) ? o.zones : []).slice(0, 128).flatMap(z => {
+      if (!z || typeof z !== 'object') return [];
+      const root = Math.round(+z.root);
+      if (!(root >= 0 && root <= 127)) return [];
+      const audioId = typeof z.audioId === 'string' && ID_RE.test(z.audioId) ? z.audioId : null;
+      const name = typeof z.name === 'string' ? z.name.slice(0, 200) : 'sample';
+      const prev = old.find(x => x.buffer && ((audioId && x.audioId === audioId) || (x.name === name && x.root === root)));
+      return [{ name, root, audioId: audioId || (prev && prev.audioId) || null, buffer: prev ? prev.buffer : null, start: prev ? prev.start : 0, source: prev ? prev.source : null }];
+    });
+    const sm = {
+      attack: num(o.attack, 0, 2000, 2),
+      release: num(o.release, 10, 10000, 300),
+      gainDb: num(o.gainDb, -40, 24, 0),
+      oneShot: !!o.oneShot,
+      zones,
+    };
+    sortZones(sm);
+    return sm;
+  }
+
+  function setZoneBuffer(z, buf) {
+    z.buffer = buf;
+    z.start = SamplerUtil.leadingSilence(buf);
+  }
+
+  // Upload sample audio that is not on the server yet (each distinct buffer once).
+  async function uploadSamples() {
+    const groups = new Map();
+    for (const x of S.tracks) {
+      for (const z of x.sampler.zones) {
+        if (!z.buffer || z.audioId) continue;
+        if (!groups.has(z.buffer)) groups.set(z.buffer, []);
+        groups.get(z.buffer).push(z);
+      }
+    }
+    let i = 0;
+    for (const [buf, group] of groups) {
+      toast(t('uploadingSamples', { i: ++i, n: groups.size }), 60000);
+      const z = group[0];
+      const blob = z.source || DSP.encodeWav(buf);
+      const name = z.source ? z.name : safeName(z.name.replace(/\.[^.]+$/, '')) + '.wav';
+      if (blob.size > S.server.maxUploadMb * 1024 * 1024) throw new Error(t('fileTooLarge', { name, mb: S.server.maxUploadMb }));
+      const res = await API.uploadAudio(blob, name);
+      for (const g of group) g.audioId = res.id;
+    }
+  }
+
+  async function addSampleFiles(tr) {
+    const files = (await pickFiles($('#fileAudio'))).filter(isAudioFile);
+    if (!files.length) return;
+    const drum = Synth.isDrum(tr.instrument);
+    const report = [];
+    for (const f of files) {
+      let buf;
+      try { buf = await decodeFile(f); } catch (e) { toast(t('decodeFail', { name: f.name })); continue; }
+      const z = { name: f.name, root: 60, buffer: null, start: 0, source: f, audioId: null };
+      setZoneBuffer(z, buf);
+      if (drum) {
+        let pad = SamplerUtil.guessDrumPad(f.name);
+        if (pad == null) {
+          const free = Synth.DRUM_KIT.find(k => !tr.sampler.zones.some(x => x.root === k.p));
+          pad = (free || Synth.DRUM_KIT[Synth.DRUM_KIT.length - 1]).p;
+        }
+        z.root = pad;
+        report.push(`${f.name} → ${t('drum_' + Synth.DRUM_KIT.find(k => k.p === pad).key)}`);
+      } else {
+        let root = SamplerUtil.rootFromFileName(f.name), how = 'rootFromName';
+        if (root == null) { root = SamplerUtil.detectPitch(buf, z.start); how = 'rootDetected'; }
+        if (root == null) { root = 60; how = 'rootDefault'; }
+        z.root = root;
+        report.push(`${f.name} → ${SamplerUtil.noteName(root)} (${t(how)})`);
+      }
+      // A new sample replaces the one on the same note / pad.
+      tr.sampler.zones = tr.sampler.zones.filter(x => x.root !== z.root);
+      tr.sampler.zones.push(z);
+    }
+    sortZones(tr.sampler);
+    renderInspector();
+    if (S.noteEditor) S.noteEditor.refresh();
+    if (report.length) toast(t('samplesAdded', { list: report.slice(0, 6).join('、') + (report.length > 6 ? '…' : '') }), 7000);
+  }
+
+  async function replaceZoneAudio(tr, z) {
+    const [f] = await pickFiles($('#fileOne'));
+    if (!f) return;
+    try {
+      setZoneBuffer(z, await decodeFile(f));
+      z.name = f.name;
+      z.source = f;
+      z.audioId = null;
+      renderInspector();
+    } catch (e) {
+      toast(t('decodeFail', { name: f.name }));
+    }
+  }
+
+  function cardSampler(tr) {
+    const C = S.inspCtrls;
+    const sm = tr.sampler;
+    const drum = Synth.isDrum(tr.instrument);
+    const list = h('div', { class: 'zone-list' });
+    if (!sm.zones.length) list.append(h('p', { class: 'hint', text: t(drum ? 'samplerEmptyDrums' : 'samplerEmpty') }));
+
+    const zones = drum
+      ? sm.zones.slice().sort((a, b) => Synth.DRUM_KIT.findIndex(k => k.p === a.root) - Synth.DRUM_KIT.findIndex(k => k.p === b.root))
+      : sm.zones; // sorted by root
+    zones.forEach((z, i) => {
+      let keyCtl, range = '';
+      if (drum) {
+        keyCtl = h('select', { 'aria-label': t('samplePad') },
+          Synth.DRUM_KIT.map(k => h('option', { value: k.p, text: t('drum_' + k.key) })),
+          Synth.DRUM_KIT.some(k => k.p === z.root) ? null : h('option', { value: z.root, text: SamplerUtil.noteName(z.root) }));
+        keyCtl.value = String(z.root);
+        keyCtl.addEventListener('change', () => {
+          const pad = +keyCtl.value;
+          sm.zones = sm.zones.filter(x => x === z || x.root !== pad);
+          z.root = pad;
+          renderInspector();
+        });
+      } else {
+        keyCtl = h('input', { type: 'text', class: 'num note-in', value: SamplerUtil.noteName(z.root), 'aria-label': t('sampleRoot'), title: t('sampleRootTip') });
+        keyCtl.addEventListener('change', () => {
+          const v = keyCtl.value.trim();
+          const p = /^\d+$/.test(v) ? +v : SamplerUtil.parseNoteName(v);
+          if (p == null || p < 0 || p > 127) { toast(t('badNoteName')); keyCtl.value = SamplerUtil.noteName(z.root); return; }
+          sm.zones = sm.zones.filter(x => x === z || x.root !== p);
+          z.root = p;
+          sortZones(sm);
+          renderInspector();
+        });
+        keyCtl.addEventListener('keydown', e => { if (e.key === 'Enter') keyCtl.blur(); });
+        // Keys played by this sample: up to halfway to the neighbouring samples.
+        const lo = i === 0 ? 0 : Math.floor((zones[i - 1].root + z.root) / 2) + 1;
+        const hi = i === zones.length - 1 ? 127 : Math.floor((z.root + zones[i + 1].root) / 2);
+        range = `${SamplerUtil.noteName(lo)} – ${SamplerUtil.noteName(hi)}`;
+      }
+      list.append(h('div', { class: 'zone-row' + (z.buffer ? '' : ' missing') },
+        h('button', { class: 'btn small', title: t('previewSample'), disabled: !z.buffer, onclick: () => previewNote(tr, z.root, 110) }, '▶'),
+        h('span', { class: 'zone-name', title: z.name, text: z.name }),
+        keyCtl,
+        h('span', { class: 'zone-range', text: z.buffer ? range : '⚠ ' + t('sampleMissing') }),
+        h('button', { class: 'btn small', title: t('replaceSample'), onclick: () => replaceZoneAudio(tr, z) }, '⇪'),
+        h('button', { class: 'btn small danger', title: t('removeSample'), onclick: () => { sm.zones = sm.zones.filter(x => x !== z); renderInspector(); } }, '✕')));
+    });
+
+    const settings = h('div', { class: 'sampler-settings' },
+      ctl(C, { label: t('attack') + ' (ms)', min: 0, max: 1000, step: 1, def: 2, fmt: v => Math.round(v) + '', get: () => sm.attack, set: v => { sm.attack = Math.round(v); } }),
+      ctl(C, { label: t('release') + ' (ms)', min: 10, max: 5000, log: true, def: 300, fmt: v => Math.round(v) + '', get: () => sm.release, set: v => { sm.release = Math.round(v); }, disabled: () => drum || sm.oneShot }),
+      ctl(C, { label: t('sampleGain') + ' (dB)', min: -24, max: 12, step: 0.5, def: 0, fmt: fmtDb, get: () => sm.gainDb, set: v => { sm.gainDb = round(v); } }),
+      drum ? null : tog(C, t('oneShot'), () => sm.oneShot, v => { sm.oneShot = v; }, () => refreshCtrls()));
+
+    return card(t('samplerCard'), {
+      cls: 'card-sampler',
+      auto: h('button', { class: 'btn small accent', onclick: () => addSampleFiles(tr) }, '⇪ ' + t('uploadSamples')),
+    }, list, settings, h('p', { class: 'hint', text: t(drum ? 'samplerHintDrums' : 'samplerHint') }));
+  }
+
+  /* ---------- Selection ---------- */
+  function setSelection(sel) {
+    S.sel = sel;
+    updateSelectionOverlay();
+    updateEditButtons();
+  }
+
+  function updateSelectionOverlay() {
+    document.querySelectorAll('.sel-overlay').forEach(el => el.remove());
+    const sel = S.sel;
+    if (!sel) return;
+    const tr = S.tracks.find(x => x.id === sel.trackId);
+    if (!tr || !tr.ui || !tr.ui.lane) return;
+    const t0 = sel.kind === 'notes' ? sel.b0 * beatSec() : sel.t0;
+    const t1 = sel.kind === 'notes' ? sel.b1 * beatSec() : sel.t1;
+    tr.ui.lane.append(h('div', { class: 'sel-overlay', style: `left:${t0 * S.pps}px;width:${Math.max(2, (t1 - t0) * S.pps)}px` }));
+  }
+
+  function setTool(tool) {
+    S.tool = tool;
+    document.body.classList.toggle('tool-range', tool === 'range');
+    $('#toolMove').classList.toggle('on', tool === 'move');
+    $('#toolRange').classList.toggle('on', tool === 'range');
+  }
+
+  // Drag on an audio lane (range tool) to select a time range.
+  function rangePointer(tr, lane, e) {
+    e.preventDefault();
+    selectTrack(tr.id);
+    const timeAt = ev => Math.max(0, (ev.clientX - lane.getBoundingClientRect().left) / S.pps);
+    const snapT = (v, ev) => (S.snap && !ev.altKey ? Math.round(v / beatSec()) * beatSec() : v);
+    const t0 = snapT(timeAt(e), e);
+    let moved = false;
+    lane.setPointerCapture(e.pointerId);
+    const move = ev => {
+      if (!moved && Math.abs(ev.clientX - e.clientX) <= 3) return;
+      moved = true;
+      const t1 = snapT(timeAt(ev), ev);
+      setSelection({ trackId: tr.id, kind: 'audio', t0: Math.min(t0, t1), t1: Math.max(t0, t1) });
+    };
+    const up = () => {
+      lane.removeEventListener('pointermove', move);
+      lane.removeEventListener('pointerup', up);
+      lane.removeEventListener('pointercancel', up);
+      if (!moved) {
+        setSelection(null);
+        if (!S.recording) seek(t0);
+      }
+    };
+    lane.addEventListener('pointermove', move);
+    lane.addEventListener('pointerup', up);
+    lane.addEventListener('pointercancel', up);
+  }
+
+  // Click / drag / Shift+click on an instrument lane selects whole bars.
+  function notesLanePointer(tr, lane, e) {
+    e.preventDefault();
+    selectTrack(tr.id);
+    const barAt = ev => Math.max(0, Math.floor((ev.clientX - lane.getBoundingClientRect().left) / S.pps / barSec()));
+    const bar = barAt(e);
+    const extend = e.shiftKey && S.sel && S.sel.trackId === tr.id && S.sel.kind === 'notes';
+    const anchor = extend ? S.selAnchor : bar;
+    S.selAnchor = anchor;
+    const apply = b => setSelection({ trackId: tr.id, kind: 'notes', b0: Math.min(anchor, b) * 4, b1: (Math.max(anchor, b) + 1) * 4 });
+    apply(bar);
+    if (!S.playing && !S.recording) seek(Math.min(anchor, bar) * barSec());
+    lane.setPointerCapture(e.pointerId);
+    const move = ev => apply(barAt(ev));
+    const up = () => {
+      lane.removeEventListener('pointermove', move);
+      lane.removeEventListener('pointerup', up);
+      lane.removeEventListener('pointercancel', up);
+    };
+    lane.addEventListener('pointermove', move);
+    lane.addEventListener('pointerup', up);
+    lane.addEventListener('pointercancel', up);
+  }
+
+  function updateEditButtons() {
+    const has = !!S.sel;
+    $('#btnCut').disabled = !has;
+    $('#btnCopy').disabled = !has;
+    $('#btnDeleteSel').disabled = !has;
+    $('#btnCrop').disabled = !(has && S.sel.kind === 'audio');
+    $('#btnPaste').disabled = !S.clipboard;
+    $('#btnPaste').title = t('paste') + (S.clipboard ? ` – ${t(S.clipboard.kind === 'notes' ? 'clipNotes' : 'clipAudio')}` : '') + ' (Ctrl+V)';
+    const u = S.undo[S.undo.length - 1], r = S.redo[S.redo.length - 1];
+    $('#btnUndo').disabled = !u;
+    $('#btnRedo').disabled = !r;
+    $('#btnUndo').title = t('undo') + (u ? `: ${u.label}` : '') + ' (Ctrl+Z)';
+    $('#btnRedo').title = t('redo') + (r ? `: ${r.label}` : '') + ' (Ctrl+Shift+Z)';
+  }
+
+  /* ---------- Undo / redo (snapshots of the edited tracks; audio buffers are immutable) ---------- */
+  function snapshotTrack(tr) {
+    return {
+      id: tr.id,
+      buffer: tr.buffer,
+      peaks: tr.peaks,
+      source: tr.source,
+      audioId: tr.audioId,
+      offset: tr.offset,
+      trimStart: tr.trimStart,
+      trimEnd: tr.trimEnd,
+      fadeIn: tr.fadeIn,
+      fadeOut: tr.fadeOut,
+      clipGainDb: tr.clipGainDb,
+      reversed: tr.reversed,
+      notes: clone(tr.notes || []),
+    };
+  }
+
+  function pushUndo(label, tracks) {
+    S.undo.push({ label, snaps: tracks.map(snapshotTrack) });
+    if (S.undo.length > 100) S.undo.shift();
+    S.redo = [];
+    updateEditButtons();
+  }
+
+  function restoreSnapshots(entry) {
+    const back = [];
+    for (const snap of entry.snaps) {
+      const tr = S.tracks.find(x => x.id === snap.id);
+      if (!tr) continue; // the track was deleted
+      back.push(snapshotTrack(tr));
+      const { id, notes, ...rest } = snap;
+      Object.assign(tr, rest);
+      tr.notes = clone(notes);
+      tr.loudCache = null;
+    }
+    return { label: entry.label, snaps: back };
+  }
+
+  function undo() {
+    const e = S.undo.pop();
+    if (!e) { toast(t('nothingToUndo')); return; }
+    S.redo.push(restoreSnapshots(e));
+    afterHistory(t('undone', { label: e.label }));
+  }
+
+  function redo() {
+    const e = S.redo.pop();
+    if (!e) { toast(t('nothingToRedo')); return; }
+    S.undo.push(restoreSnapshots(e));
+    afterHistory(t('redone', { label: e.label }));
+  }
+
+  function afterHistory(msg) {
+    renderTimeline();
+    renderInspector();
+    S.noteEditor.refresh();
+    restartSoon();
+    updateEditButtons();
+    toast(msg);
+  }
+
+  /* ---------- Cut / copy / paste / delete / crop ---------- */
+  const selTrack = () => (S.sel ? S.tracks.find(x => x.id === S.sel.trackId) || null : null);
+
+  // The audio as heard on the timeline (trim applied) as a standalone buffer.
+  function bakeClip(tr) {
+    const sr = tr.buffer.sampleRate;
+    return DSP.sliceBuffer(S.ctx, tr.buffer, tr.trimStart * sr, tr.trimEnd * sr);
+  }
+
+  // Replace a track's audio with an edited buffer that starts at `offset`.
+  function setEditedBuffer(tr, buf, offset) {
+    if (S.playing) stopVoices(tr);
+    tr.buffer = buf;
+    tr.peaks = DSP.computePeaks(buf, PEAK_BLOCK);
+    tr.trimStart = 0;
+    tr.trimEnd = buf.duration;
+    tr.offset = Math.max(0, offset);
+    tr.reversed = false; // the edited audio is baked as heard
+    tr.source = null; // no longer matches the original file; re-uploaded as WAV when saved
+    tr.audioId = null;
+    tr.loudCache = null;
+    clampClip(tr);
+  }
+
+  // Sample range [s0, s1) of the selection inside the track's clip, or null if they don't overlap.
+  function audioRange(tr, t0, t1) {
+    if (!tr.buffer) return null;
+    const sr = tr.buffer.sampleRate, len = clipLen(tr);
+    const a = clamp(t0 - tr.offset, 0, len), b = clamp(t1 - tr.offset, 0, len);
+    return b - a > 0.005 ? { s0: Math.round(a * sr), s1: Math.round(b * sr) } : null;
+  }
+
+  function afterAudioEdit() {
+    renderTimeline();
+    renderInspector();
+    restartSoon();
+  }
+
+  function editCopy(cut) {
+    const tr = selTrack();
+    if (!tr) { toast(t('selectRangeFirst'), 4000); return; }
+    if (S.sel.kind === 'notes') {
+      const { b0, b1 } = S.sel;
+      const notes = notesInRange(tr, b0, b1);
+      S.clipboard = { kind: 'notes', len: b1 - b0, notes: notes.map(n => ({ t: n.t - b0, d: n.d, p: n.p, v: n.v })) };
+      if (cut) {
+        pushUndo(t('undoCut'), [tr]);
+        const set = new Set(notes);
+        tr.notes = tr.notes.filter(n => !set.has(n));
+        onNotesChanged(tr);
+      }
+      toast(t(cut ? 'cutBars' : 'copiedBars', { n: (b1 - b0) / 4, notes: notes.length }));
+    } else {
+      const r = audioRange(tr, S.sel.t0, S.sel.t1);
+      if (!r) { toast(t('nothingToCopy')); return; }
+      const baked = bakeClip(tr);
+      S.clipboard = { kind: 'audio', buffer: DSP.sliceBuffer(S.ctx, baked, r.s0, r.s1) };
+      if (cut) {
+        pushUndo(t('undoCut'), [tr]);
+        setEditedBuffer(tr, DSP.composeBuffer(S.ctx, baked.length, baked.sampleRate, [{ buffer: baked, at: 0 }], [[r.s0, r.s1]]), tr.offset);
+        afterAudioEdit();
+      }
+      toast(t(cut ? 'cutAudio' : 'copiedAudio', { s: S.clipboard.buffer.duration.toFixed(2) }));
+    }
+    updateEditButtons();
+  }
+
+  function editDelete() {
+    const tr = selTrack();
+    if (!tr) return;
+    if (S.sel.kind === 'notes') {
+      const notes = notesInRange(tr, S.sel.b0, S.sel.b1);
+      if (!notes.length) return;
+      pushUndo(t('undoDelete'), [tr]);
+      const set = new Set(notes);
+      tr.notes = tr.notes.filter(n => !set.has(n));
+      onNotesChanged(tr);
+    } else {
+      const r = audioRange(tr, S.sel.t0, S.sel.t1);
+      if (!r) return;
+      pushUndo(t('undoDelete'), [tr]);
+      const baked = bakeClip(tr);
+      setEditedBuffer(tr, DSP.composeBuffer(S.ctx, baked.length, baked.sampleRate, [{ buffer: baked, at: 0 }], [[r.s0, r.s1]]), tr.offset);
+      afterAudioEdit();
+    }
+  }
+
+  // Keep only the selected part of an audio clip.
+  function editCrop() {
+    const tr = selTrack();
+    if (!tr || S.sel.kind !== 'audio') return;
+    const r = audioRange(tr, S.sel.t0, S.sel.t1);
+    if (!r) { toast(t('nothingToCopy')); return; }
+    pushUndo(t('crop'), [tr]);
+    const baked = bakeClip(tr);
+    setEditedBuffer(tr, DSP.sliceBuffer(S.ctx, baked, r.s0, r.s1), tr.offset + r.s0 / baked.sampleRate);
+    afterAudioEdit();
+  }
+
+  // Paste into the selected track: at its selection if it has one, otherwise at the playhead.
+  // Notes replace the bars they cover; audio overwrites (other tracks stay in sync).
+  function editPaste() {
+    const c = S.clipboard;
+    if (!c) { toast(t('clipboardEmpty')); return; }
+    const tr = selected();
+    if (!tr) { toast(t('selectTrackFirst')); return; }
+    const kind = tr.kind === 'notes' ? 'notes' : 'audio';
+    if (c.kind !== kind) { toast(t('pasteKindMismatch'), 4500); return; }
+    if (S.recording && S.recording.target === tr) return;
+    const selHere = S.sel && S.sel.trackId === tr.id && S.sel.kind === kind;
+    if (kind === 'notes') {
+      const at = selHere ? S.sel.b0 : Math.floor(position() / barSec() + NOTE_EPS) * 4;
+      pushUndo(t('undoPaste'), [tr]);
+      const old = new Set(notesInRange(tr, at, at + c.len));
+      tr.notes = tr.notes.filter(n => !old.has(n));
+      tr.notes.push(...c.notes.map(n => ({ t: at + n.t, d: n.d, p: n.p, v: n.v })));
+      onNotesChanged(tr);
+      setSelection({ trackId: tr.id, kind: 'notes', b0: at, b1: at + c.len });
+      toast(t('pastedBars', { n: c.len / 4, bar: at / 4 + 1 }));
+    } else {
+      const at = selHere ? S.sel.t0 : position();
+      const clipBuf = c.buffer, sr = clipBuf.sampleRate;
+      pushUndo(t('undoPaste'), [tr]);
+      if (!tr.buffer) {
+        setEditedBuffer(tr, clipBuf, at);
+        if (!tr.fileName) tr.fileName = t('pastedAudio');
+      } else {
+        const baked = bakeClip(tr);
+        const start = Math.min(tr.offset, at);
+        const end = Math.max(tr.offset + baked.duration, at + clipBuf.duration);
+        setEditedBuffer(tr, DSP.composeBuffer(S.ctx, (end - start) * sr, sr, [
+          { buffer: baked, at: (tr.offset - start) * sr },
+          { buffer: clipBuf, at: (at - start) * sr },
+        ]), start);
+      }
+      afterAudioEdit();
+      setSelection({ trackId: tr.id, kind: 'audio', t0: at, t1: at + clipBuf.duration });
+      toast(t('pastedAudioAt', { s: clipBuf.duration.toFixed(2), at: fmtTime(at) }));
+    }
+  }
+
   /* ---------- Global controls ---------- */
   function addEmptyTrack() {
     const tr = createTrack(null, 'other');
@@ -2050,6 +2809,8 @@
     $('#helpBody').innerHTML = t('helpHtml');
     renderServerBadge();
     populateGlobalSelects();
+    populateInstrumentMenu();
+    updateEditButtons();
     renderAll();
     positionPlayhead();
   }
@@ -2061,6 +2822,20 @@
     $('#btnRecord').addEventListener('click', toggleRecord);
     $('#btnAddAudio').addEventListener('click', async () => addAudioFiles(await pickFiles($('#fileAudio'))));
     $('#btnAddEmpty').addEventListener('click', addEmptyTrack);
+    $('#addInstrument').addEventListener('change', e => {
+      if (e.target.value) addInstrumentTrack(e.target.value);
+      e.target.value = '';
+    });
+    $('#toolMove').addEventListener('click', () => setTool('move'));
+    $('#toolRange').addEventListener('click', () => setTool('range'));
+    $('#btnCut').addEventListener('click', () => editCopy(true));
+    $('#btnCopy').addEventListener('click', () => editCopy(false));
+    $('#btnPaste').addEventListener('click', editPaste);
+    $('#btnDeleteSel').addEventListener('click', editDelete);
+    $('#btnCrop').addEventListener('click', editCrop);
+    $('#btnUndo').addEventListener('click', undo);
+    $('#btnRedo').addEventListener('click', redo);
+    $('#btnNoteClose').addEventListener('click', () => $('#noteDlg').close());
     $('#btnSave').addEventListener('click', saveProject);
     $('#btnLoad').addEventListener('click', () => openSettingsFile(null));
     $('#btnExport').addEventListener('click', exportMix);
@@ -2080,6 +2855,8 @@
       S.tracks.forEach(applyChannel);
       renderTimeline();
       refreshCtrls();
+      if (S.noteEditor) S.noteEditor.refresh();
+      restartSoon(); // note positions are in beats, so their timing changed
     });
     $('#zoom').addEventListener('input', e => setZoom(+e.target.value));
     $('#snap').addEventListener('change', e => { S.snap = e.target.checked; });
@@ -2144,6 +2921,18 @@
       const tag = (e.target.tagName || '').toLowerCase();
       const typing = tag === 'input' && !['range', 'checkbox'].includes(e.target.type) || tag === 'select' || tag === 'textarea';
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveProject(); return; }
+      if (document.querySelector('dialog[open]')) return; // dialogs handle their own keys
+      if (!typing && (e.ctrlKey || e.metaKey) && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === 'c') editCopy(false);
+        else if (k === 'x') editCopy(true);
+        else if (k === 'v') editPaste();
+        else if (k === 'z') { if (e.shiftKey) redo(); else undo(); }
+        else if (k === 'y') redo();
+        else return;
+        e.preventDefault();
+        return;
+      }
       if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
       // A focused button would also "click" on Space; blur it so the shortcut fires only once.
       if (e.key === ' ' && tag === 'button') e.target.blur();
@@ -2155,6 +2944,11 @@
         case 'm': case 'M': if (tr) { tr.mute = !tr.mute; afterMix(tr); } break;
         case 's': case 'S': if (tr) { tr.solo = !tr.solo; afterMix(tr); } break;
         case 'b': case 'B': if (tr) splitTrack(tr); break;
+        case 'v': case 'V': setTool('move'); break;
+        case 'e': case 'E': setTool('range'); break;
+        case 'Delete': case 'Backspace': if (S.sel) { e.preventDefault(); editDelete(); } break;
+        case 'Escape': setSelection(null); break;
+        case 'Enter': if (tr && tr.kind === 'notes') { e.preventDefault(); openBarEditor(tr, defaultBarFor(tr)); } break;
         case 'ArrowUp': case 'ArrowDown': {
           if (!S.tracks.length) break;
           e.preventDefault();
@@ -2183,6 +2977,17 @@
     S.master = new DSP.Master(S.ctx);
     S.master.apply({ volumeDb: S.masterVolumeDb, limiter: S.limiter });
     S.eqScratch = DSP.createEqNodes(S.ctx);
+    S.noteEditor = createNoteEditor({
+      S, h, t, L, toast,
+      onNotesChanged,
+      pushUndo,
+      undo,
+      redo,
+      updateEditButtons,
+      preview: previewNote,
+      playBar,
+      onBarChanged: (tr, bar) => setSelection({ trackId: tr.id, kind: 'notes', b0: bar * 4, b1: bar * 4 + 4 }),
+    });
     bindGlobalEvents();
     syncGlobalControls();
     changeLanguage(LANG);
