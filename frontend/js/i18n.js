@@ -89,7 +89,7 @@ const I18N = {
 
     eqCard: 'EQ (equalizer)',
     enabled: 'On',
-    eqHint: 'Drag the points to shape the curve · mouse wheel on a peak point changes Q · double-click a point to reset it.',
+    eqHint: 'Drag the points to shape the curve · mouse wheel on a peak point changes Q · double-click a point to reset it · while playing, the live spectrum shows behind the curve (grey = before EQ, blue = after EQ).',
     band_hpf: 'High-pass', band_ls: 'Low shelf', band_p1: 'Low-mid', band_p2: 'Mid', band_p3: 'High-mid', band_hs: 'High shelf', band_lpf: 'Low-pass',
     freq: 'Freq', gain: 'Gain',
 
@@ -343,6 +343,7 @@ const I18N = {
   <ul>
     <li>Seven bands: high-pass, low shelf, three peaking bands (low-mid / mid / high-mid), high shelf and low-pass.</li>
     <li>Drag the points on the curve. Mouse wheel changes Q (width) of peak bands. Double-click a point to reset it.</li>
+    <li>While playing, the live spectrum of the track shows behind the curve: grey is the sound going into the EQ, blue is the sound after the EQ, so you can see which frequencies are boosted or cut.</li>
     <li>Presets cover vocals (pop, male, female, rap, podcast, dynamic and condenser mics), drums (kick, snare, hi-hat, kit), bass (electric, synth/808, upright), guitars (acoustic, clean, distorted) and keys (piano, EP/organ, pad, lead).</li>
     <li>Rule of thumb: cut mud around 200–400 Hz, add presence around 2–5 kHz, and high-pass everything that doesn't need deep lows.</li>
   </ul>
@@ -531,7 +532,7 @@ const I18N = {
 
     eqCard: 'EQ 等化器',
     enabled: '開啟',
-    eqHint: '拖曳曲線上的點來調整・在峰值點上滾動滑鼠滾輪可改變 Q 值・雙擊點可重設。',
+    eqHint: '拖曳曲線上的點來調整・在峰值點上滾動滑鼠滾輪可改變 Q 值・雙擊點可重設・播放時背景會顯示即時頻譜（灰色是 EQ 前，藍色是 EQ 後）。',
     band_hpf: '高通', band_ls: '低頻架', band_p1: '中低頻', band_p2: '中頻', band_p3: '中高頻', band_hs: '高頻架', band_lpf: '低通',
     freq: '頻率', gain: '增益',
 
@@ -785,6 +786,7 @@ const I18N = {
   <ul>
     <li>共七段：高通、低頻架、三段峰值（中低／中／中高）、高頻架、低通。</li>
     <li>可直接拖曳曲線上的點。在峰值點上滾動滾輪可調整 Q（頻寬），雙擊點可重設。</li>
+    <li>播放時，曲線背景會顯示這條音軌的即時頻譜：灰色是進入 EQ 前的聲音，藍色是經過 EQ 後的聲音，可以直接看出哪些頻段被提升或削減。</li>
     <li>預設涵蓋：人聲（流行、男聲、女聲、饒舌、Podcast、動圈／電容麥克風）、鼓（大鼓、小鼓、腳踏鈸、整組）、貝斯（電貝斯、合成器／808、低音提琴）、吉他（木吉他、乾淨電吉他、破音電吉他）、鍵盤（鋼琴、電鋼琴／風琴、Pad、Lead）。</li>
     <li>基本原則：在 200–400 Hz 減少混濁，在 2–5 kHz 增加清晰度，不需要低頻的樂器都可以用高通濾掉。</li>
   </ul>

@@ -2138,6 +2138,52 @@
     return { x: eqX(band.freq, w), y: eqY(gain, hh), active };
   }
 
+  /* Live spectrum behind the EQ curve (drawn while playing). */
+  const SPEC_MIN_DB = -100, SPEC_MAX_DB = -12; // analyser dBFS mapped to the canvas height
+  let specBuf = null;
+
+  // Spectrum of an analyser as one y value per pixel column (log frequency axis like the EQ curve).
+  function spectrumYs(an, w, hh) {
+    if (!specBuf || specBuf.length !== an.frequencyBinCount) specBuf = new Float32Array(an.frequencyBinCount);
+    an.getFloatFrequencyData(specBuf);
+    const binHz = S.ctx.sampleRate / an.fftSize, last = specBuf.length - 1;
+    const val = i => (Number.isFinite(specBuf[i]) ? specBuf[i] : SPEC_MIN_DB);
+    const ys = new Float32Array(w + 1);
+    for (let px = 0; px <= w; px++) {
+      const b0 = eqF(px - 0.5, w) / binHz, b1 = eqF(px + 0.5, w) / binHz;
+      let db;
+      if (b1 - b0 < 1) {
+        // Low frequencies: less than one bin per pixel, interpolate between bins.
+        const b = Math.min(last - 1, eqF(px, w) / binHz), i = Math.floor(b), k = b - i;
+        db = val(i) * (1 - k) + val(i + 1) * k;
+      } else {
+        // High frequencies: many bins per pixel, keep the loudest.
+        db = -Infinity;
+        for (let i = Math.ceil(b0), e = Math.min(last, Math.floor(b1)); i <= e; i++) db = Math.max(db, val(i));
+        if (db === -Infinity) db = val(Math.min(last, Math.round(b0)));
+      }
+      ys[px] = hh - clamp((db - SPEC_MIN_DB) / (SPEC_MAX_DB - SPEC_MIN_DB), 0, 1) * hh;
+    }
+    return ys;
+  }
+
+  function fillSpectrum(g, ys, w, hh, fill, stroke) {
+    g.beginPath();
+    g.moveTo(0, hh);
+    for (let px = 0; px <= w; px++) g.lineTo(px, ys[px]);
+    g.lineTo(w, hh);
+    g.closePath();
+    g.fillStyle = fill;
+    g.fill();
+    if (stroke) {
+      g.beginPath();
+      for (let px = 0; px <= w; px++) (px ? g.lineTo(px, ys[px]) : g.moveTo(px, ys[px]));
+      g.strokeStyle = stroke;
+      g.lineWidth = 1;
+      g.stroke();
+    }
+  }
+
   function drawEqCurve() {
     const cv = S.eqCanvas, tr = selected();
     if (!cv || !tr || !cv.isConnected) return;
@@ -2168,6 +2214,13 @@
       g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
       g.fillStyle = col('--muted');
       g.fillText((db > 0 ? '+' : '') + db, 3, y - 3);
+    }
+
+    // Live spectrum while playing: grey = before the EQ, accent = after the EQ.
+    if (S.playing && tr.channel && tr.channel.specIn) {
+      const wi = Math.floor(w);
+      fillSpectrum(g, spectrumYs(tr.channel.specIn, wi, hh), wi, hh, 'rgba(200, 210, 225, 0.10)', 'rgba(200, 210, 225, 0.35)');
+      if (tr.eq.enabled) fillSpectrum(g, spectrumYs(tr.channel.specOut, wi, hh), wi, hh, 'rgba(76, 195, 255, 0.22)', 'rgba(76, 195, 255, 0.6)');
     }
 
     // Combined magnitude response of all bands
@@ -2316,6 +2369,13 @@
     }
     const bars = document.querySelectorAll('#masterMeter .bar');
     S.master.peaks().forEach((pk, i) => setMeter(bars[i], pk));
+
+    // EQ display: animate the spectrum while playing (~30 fps), redraw once more after stopping to clear it.
+    if (S.eqCanvas && S.eqCanvas.isConnected && (S.playing || S.specShown)) {
+      S.specFrame = (S.specFrame || 0) + 1;
+      if (!S.playing || S.specFrame % 2 === 0) drawEqCurve();
+      S.specShown = S.playing;
+    }
 
     if (S.grBar && S.grBar.isConnected) {
       const tr = selected();

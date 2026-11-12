@@ -93,6 +93,7 @@
    * input -> EQ -> compressor -> makeup -> pan -> volume -> mute -> dest
    *                                                           |-> reverb send -> pre-delay -> convolver -> tone -> dest
    *                                                           |-> delay send  -> delay <-> (tone -> feedback) -> dest
+   * Analysers: specIn (before EQ), specOut (after EQ), meter (channel output).
    */
   class Channel {
     constructor(ctx, dest) {
@@ -108,9 +109,16 @@
       this.meter.fftSize = 1024;
       this.meterBuf = new Float32Array(this.meter.fftSize);
 
+      // Spectrum taps for the EQ display: before and after the EQ (pre-fader, so they show even when muted).
+      this.specIn = ctx.createAnalyser();
+      this.specOut = ctx.createAnalyser();
+      for (const a of [this.specIn, this.specOut]) { a.fftSize = 8192; a.smoothingTimeConstant = 0.75; }
+
       let node = this.input;
+      node.connect(this.specIn);
       for (const k of DSP.EQ_KEYS) { node.connect(this.eq[k]); node = this.eq[k]; }
       node.connect(this.comp);
+      node.connect(this.specOut);
       this.comp.connect(this.makeup);
       this.makeup.connect(this.panner);
       this.panner.connect(this.volume);
