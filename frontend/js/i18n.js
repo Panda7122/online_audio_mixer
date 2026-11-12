@@ -57,6 +57,18 @@ const I18N = {
     noAudio: 'No audio loaded yet.',
     recordHere: 'Record here', recordHereTip: 'Record from the microphone into this empty track',
     normalize: 'Normalize', normalizeTip: 'Set clip gain so the peak reaches −1 dBFS',
+    cleanBtn: 'Remove breaths / noise', cleanTip: 'Find breaths, throat clearing and coughs in this recording and turn them down',
+    cleanTitle: 'Clean up recording: breaths & throat noise',
+    cleanIntro: 'Finds breaths and throat clearing / coughs (sounds without pitch between phrases) and turns them down. Consonants such as "s" or "sh" inside words are left alone. Listen to each spot, untick the ones to keep, then press Apply. Ctrl+Z undoes it.',
+    cleanAnalyzing: 'Analyzing the recording…',
+    cleanSensitivity: 'Detection sensitivity', cleanBreathDb: 'Breaths: turn down by', cleanNoiseDb: 'Throat clearing / coughs: turn down by', cleanMute: 'mute',
+    cleanWaveTip: 'Click a highlighted spot on the waveform to hear it.',
+    cleanKind: 'Type', cleanKind_breath: 'Breath', cleanKind_noise: 'Throat / cough', cleanUse: 'Clean this spot', cleanManual: 'manual',
+    cleanOrig: 'Original', cleanResult: 'Result', cleanPlayOrig: 'Play this spot as recorded', cleanPlayResult: 'Play this spot after clean-up',
+    cleanAll: 'Select all', cleanNone: 'Select none', cleanAddSel: 'Add selected range',
+    cleanAddSelTip: 'Something was missed? Close this, select it with the Range tool (E), then open Remove breaths / noise again and add it',
+    cleanNoneFound: 'Nothing found. Try a higher sensitivity, or select the sound with the Range tool and add it manually.',
+    cleanCount: '{on} of {n} spots selected', cleanApply: 'Apply', cleanApplied: 'Cleaned {n} spots', cleanUndo: 'Remove breaths / noise',
     reverse: 'Reverse',
     split: 'Split at playhead', splitTip: 'Cut the clip at the playhead into two tracks (shortcut: B)',
     duplicate: 'Duplicate',
@@ -406,7 +418,8 @@ const I18N = {
     <li><b>Audio tracks</b>: switch to the <b>Range</b> tool (E) and drag across the track. Switch back to <b>Move</b> (V) to move and trim clips.</li>
     <li><b>Cut / Copy / Paste / Delete</b> (Ctrl+X / C / V, Delete) work on the selection. Paste goes into the selected track, at its selection or at the playhead, and only between tracks of the same type: notes into instrument tracks (also between different instruments), audio into audio tracks (also into an empty track).</li>
     <li>Pasted notes replace the bars they cover. Audio edits keep everything in sync: cut and delete leave silence, and paste overwrites at the target position. <b>Crop</b> keeps only the selected audio.</li>
-    <li><b>Undo / Redo</b> (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y) covers note edits, cut/paste/delete/crop, moving and trimming clips, normalize and reverse.</li>
+    <li><b>〰 Remove breaths / noise</b> (Track card of an audio track) finds breaths and throat clearing / coughs between phrases and turns them down (breaths by 20 dB, throat noise muted by default). Each spot can be previewed before and after, unticked or switched between the two types; the sensitivity slider finds more or fewer spots, and anything missed can be selected with the Range tool and added by hand.</li>
+    <li><b>Undo / Redo</b> (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y) covers note edits, cut/paste/delete/crop, moving and trimming clips, normalize, reverse and noise removal.</li>
   </ul>
 </section>
 <section>
@@ -486,6 +499,18 @@ const I18N = {
     noAudio: '尚未載入音訊。',
     recordHere: '錄到此軌', recordHereTip: '用麥克風錄音到這條空白音軌',
     normalize: '標準化', normalizeTip: '調整片段增益，讓峰值達到 −1 dBFS',
+    cleanBtn: '去除呼吸／雜音', cleanTip: '找出錄音中的呼吸聲、清痰和咳嗽，並把它們降低',
+    cleanTitle: '錄音清理：呼吸聲與清痰雜音',
+    cleanIntro: '自動找出呼吸聲和清痰／咳嗽（樂句之間沒有音高的聲音）並把它們降低。字裡面的子音（例如「s」「ㄙ」「ㄒ」）不會被處理。可以逐一試聽，取消勾選想保留的段落，再按「套用」。按 Ctrl+Z 可以復原。',
+    cleanAnalyzing: '正在分析錄音…',
+    cleanSensitivity: '偵測靈敏度', cleanBreathDb: '呼吸聲降低', cleanNoiseDb: '清痰／咳嗽降低', cleanMute: '靜音',
+    cleanWaveTip: '點擊波形上標示的段落可以試聽。',
+    cleanKind: '類型', cleanKind_breath: '呼吸聲', cleanKind_noise: '清痰／咳嗽', cleanUse: '處理這一段', cleanManual: '手動',
+    cleanOrig: '原音', cleanResult: '處理後', cleanPlayOrig: '播放這一段的原始錄音', cleanPlayResult: '播放這一段處理後的聲音',
+    cleanAll: '全選', cleanNone: '全不選', cleanAddSel: '加入選取範圍',
+    cleanAddSelTip: '有漏掉的？先關閉視窗，用「範圍」工具（E）選取那一段，再重新打開「去除呼吸／雜音」加入',
+    cleanNoneFound: '沒有找到。可以調高靈敏度，或用「範圍」工具選取那個聲音後手動加入。',
+    cleanCount: '已勾選 {on}／{n} 段', cleanApply: '套用', cleanApplied: '已處理 {n} 段', cleanUndo: '去除呼吸／雜音',
     reverse: '反轉',
     split: '在播放頭分割', splitTip: '在播放頭位置把片段切成兩條音軌（快捷鍵：B）',
     duplicate: '複製',
@@ -835,7 +860,8 @@ const I18N = {
     <li><b>音訊軌</b>：切換到<b>範圍</b>工具（E）後在音軌上拖曳。切回<b>移動</b>工具（V）即可移動與修剪片段。</li>
     <li><b>剪下／複製／貼上／刪除</b>（Ctrl+X／C／V、Delete）作用於選取範圍。貼上會貼到選取的音軌中（有選取範圍時貼在範圍起點，否則貼在播放頭位置），且只能在同類型音軌之間貼上：音符貼到樂器音軌（不同樂器之間也可以），音訊貼到音訊軌（也可以貼到空白音軌）。</li>
     <li>貼上的音符會取代所覆蓋小節的內容。音訊編輯會保持各音軌對齊：剪下與刪除會留下靜音，貼上會覆寫目標位置。<b>裁切</b>只保留選取的音訊。</li>
-    <li><b>復原／重做</b>（Ctrl+Z、Ctrl+Shift+Z 或 Ctrl+Y）支援音符編輯、剪下／貼上／刪除／裁切、移動與修剪片段、標準化與反轉。</li>
+    <li><b>〰 去除呼吸／雜音</b>（音訊音軌的「音軌與編輯」卡片）會找出樂句之間的呼吸聲和清痰／咳嗽並把它們降低（預設呼吸聲降低 20 dB、清痰聲直接靜音）。每一段都可以試聽處理前後的差別、取消勾選或切換類型；靈敏度滑桿可以調整要找多少段，漏掉的可以用「範圍」工具選取後手動加入。</li>
+    <li><b>復原／重做</b>（Ctrl+Z、Ctrl+Shift+Z 或 Ctrl+Y）支援音符編輯、剪下／貼上／刪除／裁切、移動與修剪片段、標準化、反轉與去除雜音。</li>
   </ul>
 </section>
 <section>

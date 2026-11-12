@@ -8,3 +8,5 @@ __pycache__/
 .wrangler/
 .dev.vars
 .env
+separated/
+musics/

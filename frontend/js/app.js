@@ -70,6 +70,8 @@
     sepJob: null, // running separation job
     sepTarget: null, // track chosen in the separation dialog
     sepOpts: { model: 'htdemucs', shifts: 1, stems: null, muteOriginal: true, autoMix: true },
+    clean: null, // open clean-up dialog: { trackId, baked, feats, regions, progress }
+    cleanOpts: { sens: 50, breathDb: -20, noiseDb: -60 }, // last used clean-up settings
     tool: 'move', // timeline tool: 'move' (move/trim clips) or 'range' (select audio ranges)
     sel: null, // { trackId, kind: 'notes', b0, b1 (beats) } or { trackId, kind: 'audio', t0, t1 (seconds) }
     selAnchor: 0,
@@ -1096,6 +1098,214 @@
     if (added && added.buffer) openSeparationDialog(added);
   }
 
+  /* ---------- Recording clean-up: breaths, throat clearing, coughs ---------- */
+  const CLEAN_COLORS = { breath: '#4fc3f7', noise: '#ff8a65' };
+  let cleanSrc = null;
+
+  const cleanTrack = () => (S.clean ? S.tracks.find(x => x.id === S.clean.trackId) || null : null);
+  const cleanGain = r => (r.kind === 'breath' ? S.cleanOpts.breathDb : S.cleanOpts.noiseDb);
+  const fmtCleanDb = v => (v <= -60 ? t('cleanMute') : v.toFixed(0) + ' dB');
+
+  function openCleanupDialog(tr) {
+    if (!tr || !tr.buffer) return;
+    stopCleanPreview();
+    const job = { trackId: tr.id, baked: bakeClip(tr), feats: null, regions: [], progress: 0 };
+    S.clean = job;
+    renderCleanupDialog();
+    const dlg = $('#cleanDlg');
+    if (!dlg.open) dlg.showModal();
+    Cleanup.analyze(job.baked, p => {
+      if (S.clean !== job) return;
+      job.progress = p;
+      const bar = $('#cleanBar');
+      if (bar) bar.style.transform = `scaleX(${p})`;
+    }).then(feats => {
+      if (S.clean !== job) return; // dialog closed meanwhile
+      job.feats = feats;
+      redetectCleanup();
+      renderCleanupDialog();
+    });
+  }
+
+  // Re-run detection with the current sensitivity, keeping manual regions and the user's choices.
+  function redetectCleanup() {
+    const c = S.clean;
+    const prev = new Map(c.regions.filter(r => !r.manual).map(r => [r.t0.toFixed(2), r]));
+    const auto = Cleanup.detect(c.feats, S.cleanOpts.sens / 100).map(r => {
+      const p = prev.get(r.t0.toFixed(2));
+      return { ...r, on: p ? p.on : true, kind: p ? p.kind : r.kind, manual: false };
+    });
+    c.regions = auto.concat(c.regions.filter(r => r.manual)).sort((a, b) => a.t0 - b.t0);
+  }
+
+  function stopCleanPreview() {
+    if (!cleanSrc) return;
+    try { cleanSrc.stop(); } catch (e) { /* already stopped */ }
+    cleanSrc = null;
+  }
+
+  // Play a region with some context around it, as recorded or as it will sound after clean-up.
+  function previewCleanRegion(r, processed) {
+    const c = S.clean;
+    if (!c) return;
+    stopCleanPreview();
+    const sr = c.baked.sampleRate, pad = 0.6;
+    const a = Math.max(0, r.t0 - pad), b = Math.min(c.baked.duration, r.t1 + pad);
+    let buf = DSP.sliceBuffer(S.ctx, c.baked, a * sr, b * sr);
+    if (processed) buf = Cleanup.apply(S.ctx, buf, [{ t0: r.t0 - a, t1: r.t1 - a, gainDb: cleanGain(r) }]);
+    S.ctx.resume();
+    const src = S.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(S.ctx.destination);
+    src.onended = () => { if (cleanSrc === src) cleanSrc = null; };
+    src.start();
+    cleanSrc = src;
+  }
+
+  function addSelectionToCleanup() {
+    const tr = cleanTrack();
+    if (!tr || !S.sel || S.sel.kind !== 'audio' || S.sel.trackId !== tr.id) return;
+    const len = S.clean.baked.duration;
+    const t0 = clamp(S.sel.t0 - tr.offset, 0, len), t1 = clamp(S.sel.t1 - tr.offset, 0, len);
+    if (t1 - t0 < 0.01) return;
+    S.clean.regions.push({ t0, t1, kind: 'noise', levelDb: null, on: true, manual: true });
+    S.clean.regions.sort((a, b) => a.t0 - b.t0);
+    renderCleanupDialog();
+  }
+
+  function applyCleanup() {
+    const c = S.clean, tr = cleanTrack();
+    const on = c ? c.regions.filter(r => r.on) : [];
+    if (!tr || !tr.buffer || !on.length) return;
+    pushUndo(t('cleanUndo'), [tr]);
+    const out = Cleanup.apply(S.ctx, c.baked, on.map(r => ({ t0: r.t0, t1: r.t1, gainDb: cleanGain(r) })));
+    setEditedBuffer(tr, out, tr.offset);
+    $('#cleanDlg').close();
+    afterAudioEdit();
+    toast(t('cleanApplied', { n: on.length }));
+  }
+
+  function drawCleanWave(canvas) {
+    const c = S.clean;
+    if (!c || !canvas.isConnected) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, hgt = canvas.clientHeight;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(hgt * dpr);
+    const g = canvas.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, hgt);
+    const dur = c.baked.duration, x = tt => (tt / dur) * w;
+    for (const r of c.regions) {
+      g.fillStyle = r.on ? CLEAN_COLORS[r.kind] + '55' : 'rgba(255,255,255,.08)';
+      g.fillRect(x(r.t0), 0, Math.max(2, x(r.t1) - x(r.t0)), hgt);
+    }
+    // Waveform: max |sample| over all channels per pixel column.
+    const chans = Array.from({ length: c.baked.numberOfChannels }, (_, i) => c.baked.getChannelData(i));
+    const per = c.baked.length / w, mid = hgt / 2;
+    g.fillStyle = '#9aa7b8';
+    for (let px = 0; px < w; px++) {
+      const s0 = Math.floor(px * per), s1 = Math.min(c.baked.length, Math.floor((px + 1) * per));
+      let m = 0;
+      for (const d of chans) for (let i = s0; i < s1; i++) { const v = Math.abs(d[i]); if (v > m) m = v; }
+      const hh = Math.max(1, m * mid);
+      g.fillRect(px, mid - hh, 1, hh * 2);
+    }
+    for (const r of c.regions) {
+      if (!r.on) continue;
+      g.fillStyle = CLEAN_COLORS[r.kind];
+      g.fillRect(x(r.t0), hgt - 3, Math.max(2, x(r.t1) - x(r.t0)), 3);
+    }
+  }
+
+  function renderCleanupDialog() {
+    const body = $('#cleanBody'), c = S.clean, tr = cleanTrack();
+    if (!body || !c || !tr) return;
+    body.innerHTML = '';
+    body.append(h('p', { class: 'hint', text: t('cleanIntro') }));
+    if (!c.feats) {
+      body.append(
+        h('p', { text: t('cleanAnalyzing') }),
+        h('div', { class: 'sep-progress' }, h('div', { class: 'sep-bar', id: 'cleanBar', style: `transform: scaleX(${c.progress})` })));
+      return;
+    }
+
+    const regionAt = clientX => {
+      const rect = canvas.getBoundingClientRect();
+      const tt = ((clientX - rect.left) / rect.width) * c.baked.duration;
+      const slack = (4 / rect.width) * c.baked.duration;
+      return c.regions.find(r => tt >= r.t0 - slack && tt <= r.t1 + slack) || null;
+    };
+    const canvas = h('canvas', { class: 'clean-wave', title: t('cleanWaveTip') });
+    canvas.addEventListener('click', e => { const r = regionAt(e.clientX); if (r) previewCleanRegion(r, false); });
+    canvas.addEventListener('pointermove', e => { canvas.style.cursor = regionAt(e.clientX) ? 'pointer' : 'default'; });
+
+    const list = h('div', { class: 'clean-list' });
+    const count = h('span', { class: 'hint' });
+    const applyBtn = h('button', { class: 'btn accent', onclick: applyCleanup }, t('cleanApply'));
+    const refresh = () => {
+      const on = c.regions.filter(r => r.on).length;
+      count.textContent = t('cleanCount', { on, n: c.regions.length });
+      applyBtn.disabled = !on;
+      drawCleanWave(canvas);
+    };
+    const renderList = () => {
+      list.innerHTML = '';
+      if (!c.regions.length) { list.append(h('p', { class: 'hint', text: t('cleanNoneFound') })); refresh(); return; }
+      for (const r of c.regions) {
+        const kindSel = h('select', { 'aria-label': t('cleanKind') },
+          ['breath', 'noise'].map(k => h('option', { value: k, text: t('cleanKind_' + k) })));
+        kindSel.value = r.kind;
+        kindSel.addEventListener('change', () => { r.kind = kindSel.value; dot.style.background = CLEAN_COLORS[r.kind]; refresh(); });
+        const dot = h('span', { class: 'clean-dot', style: `background:${CLEAN_COLORS[r.kind]}` });
+        const box = h('input', { type: 'checkbox', checked: r.on, 'aria-label': t('cleanUse') });
+        box.addEventListener('change', () => { r.on = box.checked; row.classList.toggle('off', !r.on); refresh(); });
+        const row = h('div', { class: 'clean-row' + (r.on ? '' : ' off') },
+          box, dot, kindSel,
+          h('span', { class: 'mono', text: `${fmtTime(tr.offset + r.t0)} · ${(r.t1 - r.t0).toFixed(2)} s` }),
+          h('span', { class: 'mono hint', text: r.manual ? t('cleanManual') : `${r.levelDb.toFixed(0)} dB` }),
+          h('button', { class: 'btn small', title: t('cleanPlayOrig'), onclick: () => previewCleanRegion(r, false) }, '▶ ' + t('cleanOrig')),
+          h('button', { class: 'btn small', title: t('cleanPlayResult'), onclick: () => previewCleanRegion(r, true) }, '▶ ' + t('cleanResult')),
+          r.manual ? h('button', { class: 'btn small danger', 'aria-label': t('delete'), onclick: () => { c.regions.splice(c.regions.indexOf(r), 1); renderList(); } }, '✕') : null);
+        list.append(row);
+      }
+      refresh();
+    };
+
+    const slider = (label, min, max, get, set, fmt, onLive) => {
+      const val = h('span', { class: 'mono', text: fmt(get()) });
+      const input = h('input', { type: 'range', min, max, step: 1, value: get() });
+      input.addEventListener('input', () => { set(Number(input.value)); val.textContent = fmt(get()); if (onLive) onLive(); });
+      return h('label', { class: 'clean-ctl' }, h('span', { class: 'lbl', text: label }), input, val);
+    };
+    const o = S.cleanOpts;
+    const controls = h('div', { class: 'clean-ctls' },
+      slider(t('cleanSensitivity'), 0, 100, () => o.sens, v => { o.sens = v; }, v => v + '%', () => { redetectCleanup(); renderList(); }),
+      slider(t('cleanBreathDb'), -60, 0, () => o.breathDb, v => { o.breathDb = v; }, fmtCleanDb),
+      slider(t('cleanNoiseDb'), -60, 0, () => o.noiseDb, v => { o.noiseDb = v; }, fmtCleanDb));
+
+    const hasSel = !!(S.sel && S.sel.kind === 'audio' && S.sel.trackId === tr.id);
+    const setAll = on => { for (const r of c.regions) r.on = on; renderList(); };
+    body.append(
+      controls,
+      canvas,
+      h('div', { class: 'clean-legend hint' },
+        h('span', {}, h('span', { class: 'clean-dot', style: `background:${CLEAN_COLORS.breath}` }), t('cleanKind_breath')),
+        h('span', {}, h('span', { class: 'clean-dot', style: `background:${CLEAN_COLORS.noise}` }), t('cleanKind_noise')),
+        h('span', { text: t('cleanWaveTip') })),
+      h('div', { class: 'btn-row' },
+        h('button', { class: 'btn small', onclick: () => setAll(true) }, t('cleanAll')),
+        h('button', { class: 'btn small', onclick: () => setAll(false) }, t('cleanNone')),
+        h('button', { class: 'btn small', onclick: addSelectionToCleanup, disabled: !hasSel, title: t('cleanAddSelTip') }, '+ ' + t('cleanAddSel'))),
+      list,
+      h('div', { class: 'clean-foot' }, count,
+        h('div', { class: 'btn-row' },
+          h('button', { class: 'btn', onclick: () => $('#cleanDlg').close() }, t('cancel')),
+          applyBtn)));
+    renderList();
+    requestAnimationFrame(() => drawCleanWave(canvas));
+  }
+
   function openSeparationDialog(tr) {
     if (tr) S.sepTarget = tr;
     renderSeparationDialog();
@@ -1789,6 +1999,7 @@
       h('button', { class: 'btn small', onclick: () => normalizeTrack(tr), disabled: !tr.buffer, title: t('normalizeTip') }, t('normalize')),
       h('button', { class: 'btn small', onclick: () => reverseTrack(tr), disabled: !tr.buffer }, t('reverse')),
       h('button', { class: 'btn small', onclick: () => splitTrack(tr), disabled: !tr.buffer, title: t('splitTip') }, t('split')),
+      h('button', { class: 'btn small', onclick: () => openCleanupDialog(tr), disabled: !tr.buffer, title: t('cleanTip') }, '〰 ' + t('cleanBtn')),
       S.server ? h('button', {
         class: 'btn small ai',
         onclick: () => openSeparationDialog(tr),
@@ -2857,6 +3068,8 @@
     $('#btnServerOpen').addEventListener('click', openProjectsDialog);
     $('#btnSeparate').addEventListener('click', separateButton);
     $('#btnSepClose').addEventListener('click', () => $('#sepDlg').close());
+    $('#btnCleanClose').addEventListener('click', () => $('#cleanDlg').close());
+    $('#cleanDlg').addEventListener('close', () => { stopCleanPreview(); S.clean = null; });
     $('#btnProjectsClose').addEventListener('click', () => $('#projectsDlg').close());
     $('#serverStatus').addEventListener('click', async () => {
       if (S.serverLocked || (S.server && S.server.auth && !API.hasKey())) {

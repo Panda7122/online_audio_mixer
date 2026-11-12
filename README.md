@@ -97,7 +97,34 @@ cd backend/separator
 | `htdemucs_ft` | 鼓、貝斯、其他、人聲 | 微調版，品質最好，約慢 4 倍 |
 | `htdemucs_6s` | 再加上吉他、鋼琴 | 鋼琴分軌較不穩定 |
 
-也可以直接在命令列使用 worker：
+### 本機離線分離（不用開伺服器、不用網頁）
+
+裝好上面的 Python 環境後，可以直接在自己電腦上用命令列分離音樂。模型下載過一次之後就不需要網路，也不會產生任何費用。
+
+```bash
+./separate.sh song.mp3                        # -> separated/song/{drums,bass,other,vocals}.wav
+./separate.sh song.mp3 --karaoke              # -> separated/song/{vocals,instrumental}.wav（伴奏 = 其他分軌相加）
+./separate.sh 我的歌單/ -o stems -f flac       # 整個資料夾（含子資料夾）批次處理
+./separate.sh song.mp3 --two-stems drums      # -> drums + no_drums
+./separate.sh song.mp3 --stems vocals,bass    # 只輸出指定分軌
+./separate.sh song.mp3 -m htdemucs_ft --shifts 4   # 品質最好，比較慢
+./separate.sh --help                          # 所有選項
+```
+
+| 選項 | 說明 |
+|---|---|
+| `-o, --outdir` | 輸出資料夾，預設 `./separated`，每首歌一個子資料夾 |
+| `-m, --model` | `htdemucs`（預設）、`htdemucs_ft`、`htdemucs_6s` |
+| `-f, --format` | `wav`（預設）、`flac`、`mp3`（320 kbps） |
+| `--karaoke` / `--two-stems STEM` | 只輸出某個分軌與「其餘全部」 |
+| `--stems` | 只保留指定分軌（逗號分隔） |
+| `--device` | `auto`（預設，有 GPU 就用）、`cuda`、`cpu`、`mps` |
+| `--shifts` | 1–10，越多品質略好、時間等比增加 |
+| `--overwrite` | 重新處理已經分離過的歌（預設會跳過） |
+
+輸入可以是任何 ffmpeg 讀得到的格式（mp3、wav、flac、m4a、ogg，甚至 mp4 影片）。模型只會載入一次，所以批次處理很多首歌時比一首一首跑快。分好的分軌可以直接用網頁的「+ 上傳音檔」拖進混音器。
+
+伺服器使用的 JSON 輸出 worker 也可以直接呼叫：
 
 ```bash
 backend/separator/.venv/bin/python backend/separator/separate.py \

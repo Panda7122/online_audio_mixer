@@ -46,11 +46,18 @@ def decode_audio(path, samplerate):
     return data.reshape(-1, 2).T.copy()
 
 
+CODECS = {
+    "flac": ["-c:a", "flac", "-sample_fmt", "s16"],
+    "wav": ["-c:a", "pcm_s16le"],
+    "mp3": ["-c:a", "libmp3lame", "-b:a", "320k"],
+}
+
+
 def encode_audio(data, samplerate, path, fmt):
-    """Encode a (2, samples) float array to FLAC (16-bit) or WAV (16-bit PCM)."""
+    """Encode a (2, samples) float array to FLAC (16-bit), WAV (16-bit PCM) or MP3 (320 kbps)."""
     import numpy as np
 
-    codec = ["-c:a", "flac", "-sample_fmt", "s16"] if fmt == "flac" else ["-c:a", "pcm_s16le"]
+    codec = CODECS[fmt]
     cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y",
            "-f", "f32le", "-ac", "2", "-ar", str(samplerate), "-i", "-", *codec, path]
     raw = np.ascontiguousarray(np.clip(data, -1.0, 1.0).T, dtype=np.float32).tobytes()
@@ -91,12 +98,14 @@ def check():
     )
 
 
-def install_progress_hook(total_passes):
+def install_progress_hook(total_passes, report=None):
     """Report progress by replacing the tqdm wrapper demucs uses when progress=True.
 
     demucs.apply calls tqdm.tqdm(futures, ...) once per model pass (models in a bag x shifts);
     each item is one audio chunk that gets computed while we iterate.
+    `report(value)` receives progress in 0..1 (default: a JSON progress event).
     """
+    report = report or (lambda value: emit(event="progress", value=value))
     import demucs.apply as dapply
 
     state = {"pass": 0, "last": -1.0}
@@ -112,15 +121,35 @@ def install_progress_hook(total_passes):
                 value = min(1.0, (current + (i + 1) / n) / total_passes)
                 if value - state["last"] >= 0.005 or value >= 1.0:
                     state["last"] = value
-                    emit(event="progress", value=round(value, 4))
+                    report(round(value, 4))
             state["pass"] += 1
 
     dapply.tqdm = ProgressTqdm
 
 
+def count_passes(model, shifts):
+    """Number of model passes apply_model makes (models in a bag x random shifts)."""
+    from demucs.apply import BagOfModels
+
+    return (len(model.models) if isinstance(model, BagOfModels) else 1) * max(1, shifts)
+
+
+def run_model(model, wav, device, shifts, overlap):
+    """Separate a (2, samples) tensor; returns (sources, 2, samples) on the CPU."""
+    import torch
+    from demucs.apply import apply_model
+
+    # Normalize like the official demucs CLI, then undo it on the output.
+    ref = wav.mean(0)
+    mean, std = ref.mean(), ref.std() + 1e-8
+    with torch.no_grad():
+        out = apply_model(model, ((wav - mean) / std)[None], device=device, shifts=shifts, split=True,
+                          overlap=overlap, progress=True)[0]
+    return (out * std + mean).cpu()
+
+
 def separate(args):
     import torch
-    from demucs.apply import BagOfModels, apply_model
     from demucs.pretrained import get_model
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -138,18 +167,9 @@ def separate(args):
     emit(event="status", stage="decoding")
     wav = torch.from_numpy(decode_audio(args.input, samplerate))
 
-    # Normalize like the official demucs CLI, then undo it on the output.
-    ref = wav.mean(0)
-    mean, std = ref.mean(), ref.std() + 1e-8
-    wav = (wav - mean) / std
-
-    passes = (len(model.models) if isinstance(model, BagOfModels) else 1) * max(1, args.shifts)
-    install_progress_hook(passes)
+    install_progress_hook(count_passes(model, args.shifts))
     emit(event="status", stage="separating", device=device)
-    with torch.no_grad():
-        out = apply_model(model, wav[None], device=device, shifts=args.shifts, split=True,
-                          overlap=args.overlap, progress=True)[0]
-    out = out * std + mean
+    out = run_model(model, wav, device, args.shifts, args.overlap)
 
     emit(event="status", stage="encoding")
     stems = []
@@ -157,7 +177,7 @@ def separate(args):
         if name not in wanted:
             continue
         path = os.path.join(args.outdir, f"{name}.{args.format}")
-        encode_audio(source.cpu().numpy(), samplerate, path, args.format)
+        encode_audio(source.numpy(), samplerate, path, args.format)
         stems.append({"name": name, "path": path})
 
     emit(event="done", samplerate=samplerate, model=args.model, stems=stems)

@@ -133,6 +133,14 @@
     <div id="sepBody" class="help-body"></div>
   </dialog>
 
+  <dialog id="cleanDlg" class="help clean-dlg">
+    <div class="help-head">
+      <h2 data-i18n="cleanTitle"></h2>
+      <button class="btn icon" id="btnCleanClose" aria-label="Close">✕</button>
+    </div>
+    <div id="cleanBody" class="help-body"></div>
+  </dialog>
+
   <input type="file" id="fileAudio" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.opus" multiple hidden>
   <input type="file" id="fileOne" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.opus" hidden>
   <input type="file" id="fileJson" accept=".json,application/json" hidden>
@@ -147,6 +155,7 @@
   <script src="js/synth.js"></script>
   <script src="js/sampler.js"></script>
   <script src="js/noteeditor.js"></script>
+  <script src="js/cleanup.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
