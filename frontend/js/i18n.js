@@ -44,7 +44,7 @@ const I18N = {
     orRecord: 'or select this track and press ● to record',
     recLane: 'Recording…',
     trimHandle: 'Drag to trim',
-    clipTip: 'Drag to move · drag the edges to trim',
+    clipTip: 'Audio clip: drag to move (also to another audio track), Ctrl+drag to duplicate, drag an edge to trim, Shift+click to select several, right-click to delete',
     barBeat: 'Bar',
     selectTrackHint: 'Select a track to open its channel strip (editing, volume, pan, EQ, compression, reverb and delay).',
 
@@ -136,7 +136,7 @@ const I18N = {
     settingsSaved: 'Settings saved as mix-settings.json',
     stripSaved: 'Track settings saved',
     settingsLoaded: 'Settings loaded.',
-    settingsLoadedMissing: 'Settings loaded. {n} track(s) have no audio yet; use "Load audio" on them and the edits will be kept.',
+    settingsLoadedMissing: 'Settings loaded. {n} clip(s) have no audio yet: add or drop the audio files (same file names) or double-click the clips to load them.',
     stripLoaded: 'Track settings applied to "{name}"',
     badFile: 'This is not a valid mixer settings file.',
     selectTrackFirst: 'Select a track first.',
@@ -218,7 +218,7 @@ const I18N = {
     sepDone: 'Separation finished: added {n} stem track(s).',
 
     addInstrument: 'Instrument track',
-    instTrackAdded: 'Instrument track added. Double-click a bar to write notes.',
+    instTrackAdded: 'Instrument track added with an empty pattern. Double-click the pattern to write notes.',
     instrument: 'Instrument',
     toInstrument: 'Make instrument track',
     toInstrumentTip: 'Turn this empty track into an instrument track you can write notes on',
@@ -228,8 +228,8 @@ const I18N = {
     notesInfo: '{n} notes in {bars} bars',
     clearNotes: 'Clear all notes',
     confirmClearNotes: 'Remove every note on this track?',
-    notesTrackHint: 'Click a bar to select it, drag or Shift+click to select several. Double-click a bar to edit its notes. Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste bars between instrument tracks.',
-    notesLaneHint: 'Double-click a bar to write notes',
+    notesTrackHint: 'Double-click an empty spot on this track to add a pattern, then double-click the pattern to write notes.',
+    notesLaneHint: 'Double-click to add a pattern',
     barN: 'Bar {n}',
     toolMove: 'Move',
     toolMoveTip: 'Move / trim tool: drag clips to move them, drag edges to trim (V)',
@@ -246,10 +246,10 @@ const I18N = {
     nothingToRedo: 'Nothing to redo.',
     undone: 'Undone: {label}',
     redone: 'Redone: {label}',
-    selectRangeFirst: 'Select bars on an instrument track, or a range on an audio track (Range tool) first.',
+    selectRangeFirst: 'Select clips first (click / Shift+click / drag a box), or a time range with the Range tool (E).',
     nothingToCopy: 'The selection is empty.',
     clipboardEmpty: 'The clipboard is empty.',
-    pasteKindMismatch: 'You can only paste between tracks of the same type (notes → instrument track, audio → audio track).',
+    pasteKindMismatch: 'Nothing pasted: audio clips go to audio tracks and pattern clips to instrument tracks (empty tracks take either). Select a suitable track first.',
     cutBars: 'Cut {n} bar(s) ({notes} notes)',
     copiedBars: 'Copied {n} bar(s) ({notes} notes)',
     pastedBars: 'Pasted {n} bar(s) at bar {bar}',
@@ -270,8 +270,8 @@ const I18N = {
     rowUp: 'Move to the row above (↑)', rowDown: 'Move to the row below (↓)',
     quantize: 'Quantize', quantizeTip: 'Snap the selected notes (or the whole bar) to the grid (Q)',
     clearBar: 'Clear bar',
-    noteEditorHint: 'Click an empty cell to add a note (click again on empty space to deselect). Drag a note to move it, drag its right edge to change its length, drag on empty space to box-select, Shift+click to add to the selection. Double-click or right-click deletes. Keys: Delete, Ctrl+A/C/X/V, Ctrl+Z, ↑↓ transpose, ←→ move, Q quantize, Space play, Alt+←/→ change bar. Click the keyboard to hear a pitch.',
-    drumEditorHint: 'Click a cell to add a hit, drag hits to move them, drag on empty space to box-select. Double-click or right-click deletes. Velocity sets how hard each hit is. Keys: Delete, Ctrl+A/C/X/V, Ctrl+Z, ←→ move, Q quantize, Space play, Alt+←/→ change bar.',
+    noteEditorHint: 'Click an empty spot to add a note (when notes are selected, the first click deselects). Drag a note to move it, drag its right edge to change its length, drag on empty space to box-select, Shift+click to add to the selection. Double-click or right-click deletes. Drag in the velocity lane at the bottom to set velocities. Click the ruler to place the orange cursor (Play and Paste start there). Keys: Delete, Ctrl+A/C/X/V, Ctrl+Z, ↑↓ transpose (Shift = octave), ←→ move, Q quantize, Space play, Ctrl+wheel zoom. Notes past the end make the pattern longer.',
+    drumEditorHint: 'Click a cell to add a hit, drag hits to move them, drag on empty space to box-select. Double-click or right-click deletes. Drag in the velocity lane to set how hard each hit is. Keys: Delete, Ctrl+A/C/X/V, Ctrl+Z, ←→ move, Q quantize, Space play, Ctrl+wheel zoom.',
     drum_crash: 'Crash', drum_ride: 'Ride', drum_openHat: 'Open hi-hat', drum_closedHat: 'Closed hi-hat',
     drum_highTom: 'High tom', drum_midTom: 'Mid tom', drum_floorTom: 'Floor tom', drum_clap: 'Clap', drum_snare: 'Snare', drum_kick: 'Kick',
 
@@ -303,7 +303,59 @@ const I18N = {
     serverLockedTip: 'This server is protected. Click to enter the access key (API_TOKEN). Mixing works without it.',
     enterAccessKey: 'Access key for this server (the API_TOKEN set by its owner):',
     badAccessKey: 'The access key was not accepted.',
-
+    toolSlice: 'Slice',
+    toolSliceTip: 'Slice tool (C): click a clip to cut it in two at that point',
+    patternN: 'Pattern {n}',
+    clipMissing: 'missing audio: {name} (double-click to load)',
+    patternClipTip: 'Pattern clip: drag to move (also to another instrument track), Ctrl+drag to duplicate, drag an edge to shorten or loop it, double-click to edit the notes, right-click to delete',
+    editPatternTip: 'Edit the pattern (piano roll / step sequencer)',
+    addAudioHere: 'Add audio',
+    addAudioHereTip: 'Add an audio file to this track at the playhead',
+    undoAddClip: 'Add clip',
+    undoRecord: 'Record',
+    undoDuplicateClip: 'Duplicate clip',
+    undoNewPattern: 'New pattern',
+    undoPlacePattern: 'Place pattern',
+    makeUnique: 'Make unique',
+    makeUniqueTip: 'Give this clip its own copy of the pattern, so editing it no longer changes the other clips',
+    newPattern: 'New pattern',
+    newPatternTip: 'New empty pattern at the playhead bar (or double-click an empty spot on the track)',
+    placePattern: 'Place',
+    placePatternTip: 'Place the chosen pattern at the playhead bar. Every clip of a pattern plays the same notes.',
+    patternsInfo: '{clips} pattern clip(s) using {patterns} pattern(s)',
+    selectPatternHint: 'Click a pattern clip on the timeline to edit it; double-click it to write notes.',
+    patternCard: 'Pattern',
+    patternName: 'Name',
+    patternInfo: '{notes} note(s) · used by {uses} clip(s)',
+    editPattern: 'Edit notes',
+    patternLen: 'Pattern length',
+    bars: 'bars',
+    clipStartBar: 'Clip start (bar)',
+    clipLenBars: 'Clip length (bars)',
+    deleteTrack: 'Delete track',
+    deleteClip: 'Delete clip',
+    clipCard: 'Selected clip',
+    clipsInfo: '{n} clip(s) on this track',
+    selectClipHint: 'Click a clip on the timeline to edit it (trim, fades, gain, normalize, clean-up…).',
+    clipboardClips: '{n} clip(s)',
+    clipsFilled: 'Audio loaded into {n} waiting clip(s).',
+    clipsAdded: 'Added {n} clip(s) to {name}.',
+    cutClips: 'Cut {n} clip(s)',
+    copiedClips: 'Copied {n} clip(s)',
+    pastedClips: 'Pasted {n} clip(s) at {at}',
+    pasteSkipped: '{n} clip(s) skipped: no track of the right type below.',
+    stepSeq: 'Step sequencer',
+    pianoRoll: 'Piano roll',
+    playPattern: 'Play',
+    playPatternTip: 'Play the pattern in a loop from the orange cursor (Space)',
+    pasteAtCursor: 'Paste at the orange cursor',
+    clearPattern: 'Clear',
+    confirmClearPattern: 'Delete all notes of this pattern?',
+    undoClearPattern: 'Clear pattern',
+    zoomIn: 'Zoom in',
+    zoomOut: 'Zoom out',
+    selectNotesFirst: 'Select notes first (click, Shift+click, drag a box or Ctrl+A).',
+    stepEditorHint: 'Click a step to add or remove a hit, drag to paint or erase several. Shift+click a hit to change its accent (normal → loud → soft). The velocity slider sets new hits. Click the ruler to set where Play starts. Ctrl+Z undoes.',
     helpHtml: `
 <section>
   <h3>1. Quick start</h3>
@@ -315,12 +367,14 @@ const I18N = {
   </ol>
 </section>
 <section>
-  <h3>2. Tracks & editing</h3>
+  <h3>2. Tracks, clips & editing (like a DAW playlist)</h3>
   <ul>
-    <li><b>Move</b> a clip by dragging it. <b>Trim</b> by dragging its left or right edge. Turn on <b>Snap to beat</b> to snap to the BPM grid (hold Alt to bypass).</li>
-    <li>The Track card has precise fields for start position, trim, fade in/out and clip gain, plus <b>Normalize</b> (peak to −1 dBFS), <b>Reverse</b>, <b>Split at playhead</b>, <b>Duplicate</b>, reorder (▲▼) and <b>Delete</b>.</li>
-    <li><b>M</b> mutes and <b>S</b> solos a track. ⇪ loads or replaces the audio of a track.</li>
-    <li>Click or drag the ruler to move the playhead. Ctrl/⌘ + mouse wheel zooms the timeline.</li>
+    <li>A track can hold <b>any number of clips</b>. Drop audio files on a track lane (or use ⇪ / <b>Add audio</b>) to place them there; dropping elsewhere creates new tracks.</li>
+    <li><b>Move tool (V)</b>: click a clip to select it, Shift+click to add more, drag on empty space to box-select. <b>Drag</b> clips to move them in time and <b>to another track</b> of the same type (or an empty track). <b>Ctrl+drag</b> duplicates. Drag a clip's left or right edge to <b>trim</b> it. <b>Right-click</b> deletes a clip.</li>
+    <li><b>Slice tool (C)</b>: click a clip to cut it in two at that point. <b>B</b> splits the selected clips at the playhead.</li>
+    <li>Turn on <b>Snap to beat</b> to snap to the BPM grid (hold Alt to bypass). The ruler shows seconds and bar numbers.</li>
+    <li>The Track card shows the selected clip: start, trim, fades and clip gain, plus <b>Normalize</b>, <b>Reverse</b>, <b>Split</b>, <b>Remove breaths / noise</b>, <b>AI source separation</b> and <b>Delete clip</b>. Track buttons: add audio, record, duplicate, reorder (▲▼), delete.</li>
+    <li><b>M</b> mutes and <b>S</b> solos a track. Click or drag the ruler to move the playhead. Ctrl/⌘ + mouse wheel zooms the timeline.</li>
   </ul>
 </section>
 <section>
@@ -397,30 +451,31 @@ const I18N = {
   <h3>13. AI source separation (HTDemucs)</h3>
   <ul>
     <li>Splits a mixed song into separate stems: vocals, drums, bass and other (the 6-stem model adds guitar and piano). Runs on the server, using the GPU when available.</li>
-    <li>Select a track and click <b>✦ AI source separation</b> (toolbar or Track card). With no track selected, the toolbar button asks for a file first.</li>
+    <li>Select an audio clip and click <b>✦ AI source separation</b> (toolbar or Track card). With no clip selected, the toolbar button asks for a file first. The stems become new tracks, each with a clip at the same place as the source clip.</li>
     <li>Choose a <b>model</b> and <b>quality</b> (more passes = slightly cleaner, slower) and the stems to import. Each stem becomes a new track with the right role, aligned with the source and with the same trims and fades.</li>
     <li>Options: mute the original track, and auto-mix the new tracks with the current genre template. You can close the dialog while it runs: the toolbar button shows the progress.</li>
     <li>Typical uses: karaoke / instrumental versions, remixing, re-balancing a finished mix, or applying separate EQ and compression to the vocal.</li>
   </ul>
 </section>
 <section>
-  <h3>14. Instrument tracks & note editing</h3>
+  <h3>14. Instrument tracks, patterns, piano roll & step sequencer</h3>
   <ul>
-    <li>Choose an instrument in the <b>+ Instrument track</b> menu (piano, electric piano, organ, guitar, bass, synth bass, synth lead, pad, strings, drum kit), or press <b>♪ Make instrument track</b> on an empty track. The instrument can be changed later in the Track card. Instrument tracks use the same volume, pan, EQ, compression, reverb and delay as audio tracks and are included in the WAV export.</li>
-    <li>The lane is divided into bars (4/4, following the BPM). <b>Double-click a bar</b> (or press Enter / ✎) to open the <b>note editor</b> for that bar: a piano roll, or a drum grid for the drum kit.</li>
-    <li><b>Your own sounds</b>: choose <b>Custom sound (upload samples)</b> or <b>Custom drum kit (upload samples)</b> as the instrument, then press <b>⇪ Upload samples</b> in the Sampler card. For melodic sounds each note plays the nearest sample, pitch-shifted, and the root note comes from the file name (e.g. "Piano C4.wav") or is detected automatically. For drum kits each sample is assigned to a pad (kick, snare, hat…). Attack, release, level and whole-sample playback can be adjusted. Samples are saved with the project on the server.</li>
-    <li>In the editor: click to add a note, drag to move, drag the right edge to change length, drag on empty space to box-select, Shift+click to add to the selection, double-click / right-click to delete. Set the grid (1/4 to 1/32, triplets), note length and velocity, transpose, quantize, play the bar, and move to the previous or next bar.</li>
+    <li>Choose an instrument in the <b>+ Instrument track</b> menu (piano, electric piano, organ, guitar, bass, synth bass, synth lead, pad, strings, drum kit, or your own samples). The instrument can be changed later in the Track card.</li>
+    <li>Notes live in <b>patterns</b>, which are placed on instrument tracks as <b>pattern clips</b>. Double-click an empty spot of an instrument track to add a new pattern there; use <b>Place</b> in the Track card to put an existing pattern at the playhead. Every clip of a pattern plays the same notes, so editing one changes all of them; <b>Make unique</b> gives a clip its own copy. Making a pattern clip longer than its pattern loops it.</li>
+    <li><b>Double-click a pattern clip</b> (or press Enter / ✎) to open the <b>piano roll</b>: one continuous roll for the whole pattern with scrolling, zoom (Ctrl+wheel), a <b>velocity lane</b>, grid / note length, transpose, quantize, copy / paste and loop playback. Drawing past the end makes the pattern longer; the length can also be set directly.</li>
+    <li>Drum patterns open in the <b>step sequencer</b>: one row per drum, 16 steps per bar. Click steps to add or remove hits, drag to paint, Shift+click for accents. Switch to the piano roll at any time.</li>
+    <li><b>Your own sounds</b>: choose <b>Custom sound (upload samples)</b> or <b>Custom drum kit (upload samples)</b> as the instrument, then press <b>⇪ Upload samples</b> in the Sampler card. For melodic sounds each note plays the nearest sample, pitch-shifted, and the root note comes from the file name (e.g. "Piano C4.wav") or is detected automatically. For drum kits each sample is assigned to a pad (kick, snare, hat…). Samples are saved with the project on the server.</li>
   </ul>
 </section>
 <section>
   <h3>15. Selecting, cut / copy / paste, undo</h3>
   <ul>
-    <li><b>Instrument tracks</b>: click a bar to select it, drag or Shift+click to select several bars.</li>
-    <li><b>Audio tracks</b>: switch to the <b>Range</b> tool (E) and drag across the track. Switch back to <b>Move</b> (V) to move and trim clips.</li>
-    <li><b>Cut / Copy / Paste / Delete</b> (Ctrl+X / C / V, Delete) work on the selection. Paste goes into the selected track, at its selection or at the playhead, and only between tracks of the same type: notes into instrument tracks (also between different instruments), audio into audio tracks (also into an empty track).</li>
-    <li>Pasted notes replace the bars they cover. Audio edits keep everything in sync: cut and delete leave silence, and paste overwrites at the target position. <b>Crop</b> keeps only the selected audio.</li>
-    <li><b>〰 Remove breaths / noise</b> (Track card of an audio track) finds breaths and throat clearing / coughs between phrases and turns them down (breaths by 20 dB, throat noise muted by default). Each spot can be previewed before and after, unticked or switched between the two types; the sensitivity slider finds more or fewer spots, and anything missed can be selected with the Range tool and added by hand.</li>
-    <li><b>Undo / Redo</b> (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y) covers note edits, cut/paste/delete/crop, moving and trimming clips, normalize, reverse and noise removal.</li>
+    <li><b>Clips</b>: select them with the Move tool (click, Shift+click, box). <b>Ctrl+A</b> selects all clips.</li>
+    <li><b>Time ranges</b>: with the <b>Range tool (E)</b> drag across a track; drag up or down to include several tracks.</li>
+    <li><b>Cut / Copy / Paste / Delete</b> (Ctrl+X / C / V, Delete) work on the selected range, or else on the selected clips. Cutting or deleting a range cuts the clips at its edges and leaves a gap (nothing else moves); <b>Crop</b> keeps only the range.</li>
+    <li><b>Paste</b> goes to the selected track, at its selected range or at the playhead; when several tracks were copied, the others land on the tracks below. Audio clips paste into audio tracks, pattern clips into instrument tracks, and empty tracks take either, so you can cut from one recording track and paste into another.</li>
+    <li><b>〰 Remove breaths / noise</b> (Track card, selected audio clip) finds breaths and throat clearing / coughs between phrases and turns them down. Each spot can be previewed before and after, unticked or switched between the two types; anything missed can be selected with the Range tool and added by hand.</li>
+    <li><b>Undo / Redo</b> (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y) covers clip moves, trims, splits, duplicates, cut / paste / delete / crop, note editing, normalize, reverse and noise removal.</li>
   </ul>
 </section>
 <section>
@@ -430,15 +485,17 @@ const I18N = {
     <tr><td><kbd>Home</kbd></td><td>Go to start</td></tr>
     <tr><td><kbd>R</kbd></td><td>Record / stop recording</td></tr>
     <tr><td><kbd>M</kbd> / <kbd>S</kbd></td><td>Mute / solo the selected track</td></tr>
-    <tr><td><kbd>B</kbd></td><td>Split the selected track at the playhead</td></tr>
-    <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>Select previous / next track</td></tr>
-    <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save settings</td></tr>
-    <tr><td><kbd>V</kbd> / <kbd>E</kbd></td><td>Move tool / Range tool</td></tr>
-    <tr><td><kbd>Ctrl</kbd>+<kbd>X</kbd> / <kbd>C</kbd> / <kbd>V</kbd></td><td>Cut / copy / paste the selection</td></tr>
+    <tr><td><kbd>V</kbd> / <kbd>C</kbd> / <kbd>E</kbd></td><td>Move tool / Slice tool / Range tool</td></tr>
+    <tr><td><kbd>B</kbd></td><td>Split the selected clips at the playhead</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+drag</td><td>Duplicate clips</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>Select all clips</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>X</kbd> / <kbd>C</kbd> / <kbd>V</kbd></td><td>Cut / copy / paste</td></tr>
     <tr><td><kbd>Delete</kbd></td><td>Delete the selection</td></tr>
     <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Undo / redo</td></tr>
-    <tr><td><kbd>Enter</kbd></td><td>Open the note editor (instrument track)</td></tr>
+    <tr><td><kbd>Enter</kbd></td><td>Open the pattern editor (instrument track)</td></tr>
+    <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>Select previous / next track</td></tr>
     <tr><td><kbd>Esc</kbd></td><td>Clear the selection</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save settings</td></tr>
     <tr><td><kbd>?</kbd></td><td>Open this guide</td></tr>
   </table>
 </section>`,
@@ -487,7 +544,7 @@ const I18N = {
     orRecord: '或選取此音軌後按 ● 錄音',
     recLane: '錄音中…',
     trimHandle: '拖曳以修剪',
-    clipTip: '拖曳移動・拖曳左右邊緣修剪',
+    clipTip: '音訊片段：拖曳可移動（也可拖到其他音訊音軌），Ctrl+拖曳可複製，拖曳邊緣可修剪，Shift+點擊可多選，按右鍵刪除',
     barBeat: '小節',
     selectTrackHint: '選取一條音軌，即可開啟它的通道設定（編輯、音量、聲像、EQ、壓縮、殘響與延遲）。',
 
@@ -579,7 +636,7 @@ const I18N = {
     settingsSaved: '設定已儲存為 mix-settings.json',
     stripSaved: '音軌設定已儲存',
     settingsLoaded: '設定已載入。',
-    settingsLoadedMissing: '設定已載入。有 {n} 條音軌還沒有音訊，請在這些音軌上按「載入音檔」，編輯設定會保留。',
+    settingsLoadedMissing: '設定已載入。有 {n} 個片段還沒有音訊：請加入或拖入同檔名的音檔，或雙擊這些片段來載入。',
     stripLoaded: '已將音軌設定套用到「{name}」',
     badFile: '這不是有效的混音設定檔。',
     selectTrackFirst: '請先選取一條音軌。',
@@ -661,7 +718,7 @@ const I18N = {
     sepDone: '音源分離完成：已新增 {n} 條分軌。',
 
     addInstrument: '樂器音軌',
-    instTrackAdded: '已新增樂器音軌。雙擊任一小節即可開始打譜。',
+    instTrackAdded: '已新增樂器音軌和一個空白 pattern。雙擊 pattern 即可開始打譜。',
     instrument: '樂器',
     toInstrument: '改為樂器音軌',
     toInstrumentTip: '把這條空白音軌改成可以輸入音符的樂器音軌',
@@ -671,8 +728,8 @@ const I18N = {
     notesInfo: '共 {n} 個音符，分布在 {bars} 個小節',
     clearNotes: '清除所有音符',
     confirmClearNotes: '確定要刪除此音軌上的所有音符嗎？',
-    notesTrackHint: '點擊小節即可選取，拖曳或 Shift+點擊可選取多個小節。雙擊小節可編輯音符。Ctrl+C／Ctrl+X／Ctrl+V 可在樂器音軌之間複製、剪下、貼上小節。',
-    notesLaneHint: '雙擊任一小節開始打譜',
+    notesTrackHint: '在這條音軌的空白處雙擊即可新增 pattern，再雙擊 pattern 開始打譜。',
+    notesLaneHint: '雙擊即可新增 pattern',
     barN: '第 {n} 小節',
     toolMove: '移動',
     toolMoveTip: '移動／修剪工具：拖曳片段可移動，拖曳邊緣可修剪（V）',
@@ -689,10 +746,10 @@ const I18N = {
     nothingToRedo: '沒有可以重做的動作。',
     undone: '已復原：{label}',
     redone: '已重做：{label}',
-    selectRangeFirst: '請先在樂器音軌上選取小節，或用「範圍」工具在音訊軌上選取範圍。',
+    selectRangeFirst: '請先選取片段（點擊、Shift+點擊或拖曳框選），或用「範圍」工具（E）選取一段時間。',
     nothingToCopy: '選取範圍是空的。',
     clipboardEmpty: '剪貼簿是空的。',
-    pasteKindMismatch: '只能在同類型的音軌之間貼上（音符 → 樂器音軌，音訊 → 音訊軌）。',
+    pasteKindMismatch: '沒有貼上：音訊片段只能貼到音訊音軌，pattern 片段只能貼到樂器音軌（空白音軌兩種都可以）。請先選取合適的音軌。',
     cutBars: '已剪下 {n} 個小節（{notes} 個音符）',
     copiedBars: '已複製 {n} 個小節（{notes} 個音符）',
     pastedBars: '已在第 {bar} 小節貼上 {n} 個小節',
@@ -713,8 +770,8 @@ const I18N = {
     rowUp: '移到上一列（↑）', rowDown: '移到下一列（↓）',
     quantize: '量化', quantizeTip: '把選取的音符（或整個小節）對齊格線（Q）',
     clearBar: '清除小節',
-    noteEditorHint: '點擊空白格可新增音符（有選取時，點空白處會先取消選取）。拖曳音符可移動，拖曳右邊緣可改變長度，在空白處拖曳可框選，Shift+點擊可加選。雙擊或按右鍵可刪除。按鍵：Delete、Ctrl+A/C/X/V、Ctrl+Z、↑↓ 移調、←→ 移動、Q 量化、空白鍵播放、Alt+←/→ 切換小節。點擊左側鍵盤可試聽音高。',
-    drumEditorHint: '點擊格子可新增鼓擊，拖曳可移動，在空白處拖曳可框選。雙擊或按右鍵可刪除。力度決定敲擊的強弱。按鍵：Delete、Ctrl+A/C/X/V、Ctrl+Z、←→ 移動、Q 量化、空白鍵播放、Alt+←/→ 切換小節。',
+    noteEditorHint: '點擊空白處可新增音符（有選取時，第一次點擊會先取消選取）。拖曳音符可移動，拖曳右邊緣可改變長度，在空白處拖曳可框選，Shift+點擊可加選。雙擊或按右鍵可刪除。在下方力度區拖曳可調整力度。點擊上方尺規可放置橘色游標（播放和貼上都從那裡開始）。按鍵：Delete、Ctrl+A/C/X/V、Ctrl+Z、↑↓ 移調（Shift 為八度）、←→ 移動、Q 量化、空白鍵播放、Ctrl+滾輪縮放。畫在結尾之後的音符會讓 pattern 自動變長。',
+    drumEditorHint: '點擊格子可新增鼓擊，拖曳可移動，在空白處拖曳可框選。雙擊或按右鍵可刪除。在下方力度區拖曳可調整每一下的強弱。按鍵：Delete、Ctrl+A/C/X/V、Ctrl+Z、←→ 移動、Q 量化、空白鍵播放、Ctrl+滾輪縮放。',
     drum_crash: '碎音鈸', drum_ride: '疊音鈸', drum_openHat: '開放腳踏鈸', drum_closedHat: '閉合腳踏鈸',
     drum_highTom: '高音筒鼓', drum_midTom: '中音筒鼓', drum_floorTom: '落地鼓', drum_clap: '拍手', drum_snare: '小鼓', drum_kick: '大鼓',
 
@@ -746,7 +803,59 @@ const I18N = {
     serverLockedTip: '這個伺服器有保護。點此輸入存取金鑰（API_TOKEN）。不輸入也可以使用混音功能。',
     enterAccessKey: '請輸入這個伺服器的存取金鑰（伺服器擁有者設定的 API_TOKEN）：',
     badAccessKey: '存取金鑰不正確。',
-
+    toolSlice: '切割',
+    toolSliceTip: '切割工具（C）：點擊片段即可從該位置切成兩段',
+    patternN: 'Pattern {n}',
+    clipMissing: '缺少音訊：{name}（雙擊載入）',
+    patternClipTip: 'Pattern 片段：拖曳可移動（也可拖到其他樂器音軌），Ctrl+拖曳可複製，拖曳邊緣可縮短或重複播放，雙擊可編輯音符，按右鍵刪除',
+    editPatternTip: '編輯 pattern（Piano roll／步進編曲器）',
+    addAudioHere: '加入音檔',
+    addAudioHereTip: '在播放頭的位置把音檔加到這條音軌',
+    undoAddClip: '加入片段',
+    undoRecord: '錄音',
+    undoDuplicateClip: '複製片段',
+    undoNewPattern: '新增 pattern',
+    undoPlacePattern: '放置 pattern',
+    makeUnique: '獨立出來',
+    makeUniqueTip: '讓這個片段使用自己的 pattern 副本，之後編輯它就不會影響其他片段',
+    newPattern: '新增 pattern',
+    newPatternTip: '在播放頭所在的小節新增空白 pattern（也可以在音軌空白處雙擊）',
+    placePattern: '放置',
+    placePatternTip: '把選擇的 pattern 放到播放頭所在的小節。同一個 pattern 的所有片段都會播放相同的音符。',
+    patternsInfo: '共 {clips} 個 pattern 片段，使用 {patterns} 個 pattern',
+    selectPatternHint: '點擊時間軸上的 pattern 片段來編輯；雙擊可以打譜。',
+    patternCard: 'Pattern',
+    patternName: '名稱',
+    patternInfo: '{notes} 個音符・{uses} 個片段在使用',
+    editPattern: '編輯音符',
+    patternLen: 'Pattern 長度',
+    bars: '小節',
+    clipStartBar: '片段起點（小節）',
+    clipLenBars: '片段長度（小節）',
+    deleteTrack: '刪除音軌',
+    deleteClip: '刪除片段',
+    clipCard: '選取的片段',
+    clipsInfo: '這條音軌有 {n} 個片段',
+    selectClipHint: '點擊時間軸上的片段來編輯（修剪、淡入淡出、增益、標準化、去除雜音…）。',
+    clipboardClips: '{n} 個片段',
+    clipsFilled: '已把音訊放進 {n} 個等待中的片段。',
+    clipsAdded: '已在「{name}」加入 {n} 個片段。',
+    cutClips: '已剪下 {n} 個片段',
+    copiedClips: '已複製 {n} 個片段',
+    pastedClips: '已在 {at} 貼上 {n} 個片段',
+    pasteSkipped: '有 {n} 個片段沒有貼上：下方沒有類型相符的音軌。',
+    stepSeq: '步進編曲器',
+    pianoRoll: 'Piano roll',
+    playPattern: '播放',
+    playPatternTip: '從橘色游標開始循環播放這個 pattern（空白鍵）',
+    pasteAtCursor: '貼到橘色游標的位置',
+    clearPattern: '清除',
+    confirmClearPattern: '要刪除這個 pattern 的所有音符嗎？',
+    undoClearPattern: '清除 pattern',
+    zoomIn: '放大',
+    zoomOut: '縮小',
+    selectNotesFirst: '請先選取音符（點擊、Shift+點擊、拖曳框選或 Ctrl+A）。',
+    stepEditorHint: '點擊格子可以新增或移除鼓點，拖曳可以一次畫上或擦掉多格。Shift+點擊鼓點可以切換重音（一般 → 重 → 輕）。新鼓點的力度由力度滑桿決定。點擊上方尺規可以設定播放起點。按 Ctrl+Z 可以復原。',
     helpHtml: `
 <section>
   <h3>1. 快速開始</h3>
@@ -758,12 +867,14 @@ const I18N = {
   </ol>
 </section>
 <section>
-  <h3>2. 音軌與編輯</h3>
+  <h3>2. 音軌、片段與編輯（像 DAW 的 Playlist）</h3>
   <ul>
-    <li>拖曳片段可<b>移動</b>位置，拖曳左右邊緣可<b>修剪</b>。開啟<b>對齊拍子</b>會依 BPM 格線對齊（按住 Alt 可暫時取消）。</li>
-    <li>「音軌與編輯」卡片可精確輸入起始位置、修剪、淡入／淡出、片段增益，並提供<b>標準化</b>（峰值調到 −1 dBFS）、<b>反轉</b>、<b>在播放頭分割</b>、<b>複製</b>、上下移動（▲▼）與<b>刪除</b>。</li>
-    <li><b>M</b> 是靜音，<b>S</b> 是獨奏，⇪ 可載入或更換音軌的音檔。</li>
-    <li>點擊或拖曳上方時間尺可移動播放頭。Ctrl／⌘ + 滑鼠滾輪可縮放時間軸。</li>
+    <li>每條音軌可以放<b>任意數量的片段</b>。把音檔拖到某條音軌上（或按 ⇪／<b>加入音檔</b>）就會放在那裡；拖到其他地方則會建立新音軌。</li>
+    <li><b>移動工具（V）</b>：點擊片段可選取，Shift+點擊可加選，在空白處拖曳可框選。<b>拖曳</b>片段可以改變時間位置，也可以<b>拖到其他同類型的音軌</b>（或空白音軌）。<b>Ctrl+拖曳</b>可以複製。拖曳片段的左右邊緣可以<b>修剪</b>。<b>按右鍵</b>可以刪除片段。</li>
+    <li><b>切割工具（C）</b>：點擊片段就會從那個位置切成兩段。按 <b>B</b> 會在播放頭的位置切開選取的片段。</li>
+    <li>開啟<b>對齊拍子</b>可以對齊 BPM 格線（按住 Alt 暫時不對齊）。尺規上會顯示秒數和小節編號。</li>
+    <li>「音軌與編輯」卡片會顯示選取的片段：起點、修剪、淡入淡出、片段增益，以及<b>標準化</b>、<b>反轉</b>、<b>切割</b>、<b>去除呼吸／雜音</b>、<b>AI 音源分離</b>和<b>刪除片段</b>。音軌按鈕：加入音檔、錄音、複製、排序（▲▼）、刪除。</li>
+    <li><b>M</b> 靜音、<b>S</b> 獨奏。點擊或拖曳尺規可以移動播放頭，Ctrl/⌘ + 滾輪可以縮放時間軸。</li>
   </ul>
 </section>
 <section>
@@ -840,49 +951,52 @@ const I18N = {
   <h3>13. AI 音源分離（HTDemucs）</h3>
   <ul>
     <li>把混好的歌曲分離成獨立分軌：人聲、鼓、貝斯、其他（6 軌模型會再分出吉他與鋼琴）。分離在伺服器上執行，有 GPU 時會使用 GPU。</li>
-    <li>選取一條音軌後按 <b>✦ AI 音源分離</b>（工具列或「音軌與編輯」卡片）。沒有選取音軌時，工具列按鈕會先請你選擇檔案。</li>
+    <li>選取一個音訊片段後按 <b>✦ AI 音源分離</b>（工具列或「音軌與編輯」卡片）。沒有選取片段時，工具列按鈕會先請你選擇檔案。分離出的分軌會變成新的音軌，片段位置和原本的片段相同。</li>
     <li>選擇<b>模型</b>與<b>品質</b>（次數越多會略為乾淨，但較慢），以及要匯入的分軌。每個分軌會成為一條新音軌，自動設定角色，並與來源對齊、沿用相同的修剪與淡入淡出。</li>
     <li>選項：將原始音軌靜音、用目前的曲風範本自動混音新音軌。執行期間可以關閉視窗，工具列按鈕會顯示進度。</li>
     <li>常見用途：製作卡拉 OK／伴奏、重新混音、調整成品混音的比例，或單獨對人聲做 EQ 與壓縮。</li>
   </ul>
 </section>
 <section>
-  <h3>14. 樂器音軌與打譜</h3>
+  <h3>14. 樂器音軌、Pattern、Piano roll 與步進編曲器</h3>
   <ul>
-    <li>在 <b>+ 樂器音軌</b> 選單選擇樂器（鋼琴、電鋼琴、風琴、吉他、貝斯、合成器貝斯、合成器 Lead、Pad、弦樂、鼓組），或在空白音軌上按 <b>♪ 改為樂器音軌</b>。之後可在「音軌與編輯」卡片中更換樂器。樂器音軌同樣有音量、聲像、EQ、壓縮、殘響與延遲，也會一起匯出到 WAV。</li>
-    <li>音軌以小節為單位（4/4 拍，跟隨 BPM）。<b>雙擊小節</b>（或按 Enter／✎）會開啟該小節的<b>打譜編輯器</b>：一般樂器是鋼琴捲簾，鼓組是鼓格。</li>
-    <li><b>自訂音色</b>：把樂器選為<b>自訂音色（上傳取樣）</b>或<b>自訂鼓組（上傳取樣）</b>，再到「取樣音色」卡片按 <b>⇪ 上傳取樣</b>。一般樂器的每個音符會使用音高最接近的取樣並自動移調，根音由檔名判斷（例如「Piano C4.wav」）或自動偵測。鼓組則是每個取樣對應一個鼓件（大鼓、小鼓、腳踏鈸…）。可調整起音、釋放、音量，以及是否播放完整取樣。取樣會隨專案一起儲存到伺服器。</li>
-    <li>編輯器中：點擊新增音符、拖曳移動、拖曳右邊緣改變長度、在空白處拖曳框選、Shift+點擊加選、雙擊或按右鍵刪除。可設定格線（1/4 到 1/32、三連音）、音符長度與力度，也能移調、量化、播放小節、切換上一個／下一個小節。</li>
+    <li>從 <b>+ 樂器音軌</b> 選單選擇樂器（鋼琴、電鋼琴、風琴、吉他、貝斯、合成貝斯、合成主音、Pad、弦樂、鼓組，或自己上傳的音色）。之後也可以在「音軌與編輯」卡片更換樂器。</li>
+    <li>音符存在 <b>pattern</b> 裡，pattern 以 <b>pattern 片段</b>的形式放在樂器音軌上。在樂器音軌的空白處雙擊可以新增 pattern；用卡片上的<b>放置</b>可以把現有的 pattern 放到播放頭的位置。同一個 pattern 的所有片段都播放相同的音符，所以改一個就會全部一起改；按<b>獨立出來</b>可以讓某個片段使用自己的副本。把 pattern 片段拉得比 pattern 長，就會重複播放。</li>
+    <li><b>雙擊 pattern 片段</b>（或按 Enter／✎）會打開 <b>Piano roll</b>：整個 pattern 是一條連續的鋼琴卷軸，可以捲動、縮放（Ctrl+滾輪），下方有<b>力度區</b>，還有格線／音符長度、移調、量化、複製貼上和循環播放。畫在結尾之後會讓 pattern 自動變長，也可以直接設定長度。</li>
+    <li>鼓組的 pattern 會用<b>步進編曲器</b>開啟：每種鼓一排，每小節 16 格。點格子可以新增或移除鼓點，拖曳可以一次畫多格，Shift+點擊可以切換重音。隨時可以切換到 Piano roll。</li>
+    <li><b>自己的音色</b>：選擇 <b>自訂音色（上傳樣本）</b> 或 <b>自訂鼓組（上傳樣本）</b>，再到「取樣器」卡片按 <b>⇪ 上傳樣本</b>。旋律樂器會用最接近的樣本移調播放，根音從檔名判斷（例如「Piano C4.wav」）或自動偵測；鼓組則是每個樣本對應一個鼓（大鼓、小鼓、Hi-hat…）。樣本會跟專案一起存到伺服器。</li>
   </ul>
 </section>
 <section>
   <h3>15. 選取、剪下／複製／貼上、復原</h3>
   <ul>
-    <li><b>樂器音軌</b>：點擊小節即可選取，拖曳或 Shift+點擊可選取多個小節。</li>
-    <li><b>音訊軌</b>：切換到<b>範圍</b>工具（E）後在音軌上拖曳。切回<b>移動</b>工具（V）即可移動與修剪片段。</li>
-    <li><b>剪下／複製／貼上／刪除</b>（Ctrl+X／C／V、Delete）作用於選取範圍。貼上會貼到選取的音軌中（有選取範圍時貼在範圍起點，否則貼在播放頭位置），且只能在同類型音軌之間貼上：音符貼到樂器音軌（不同樂器之間也可以），音訊貼到音訊軌（也可以貼到空白音軌）。</li>
-    <li>貼上的音符會取代所覆蓋小節的內容。音訊編輯會保持各音軌對齊：剪下與刪除會留下靜音，貼上會覆寫目標位置。<b>裁切</b>只保留選取的音訊。</li>
-    <li><b>〰 去除呼吸／雜音</b>（音訊音軌的「音軌與編輯」卡片）會找出樂句之間的呼吸聲和清痰／咳嗽並把它們降低（預設呼吸聲降低 20 dB、清痰聲直接靜音）。每一段都可以試聽處理前後的差別、取消勾選或切換類型；靈敏度滑桿可以調整要找多少段，漏掉的可以用「範圍」工具選取後手動加入。</li>
-    <li><b>復原／重做</b>（Ctrl+Z、Ctrl+Shift+Z 或 Ctrl+Y）支援音符編輯、剪下／貼上／刪除／裁切、移動與修剪片段、標準化、反轉與去除雜音。</li>
+    <li><b>片段</b>：用移動工具選取（點擊、Shift+點擊、框選）。<b>Ctrl+A</b> 選取所有片段。</li>
+    <li><b>時間範圍</b>：用<b>範圍工具（E）</b>在音軌上拖曳；往上或往下拖可以一次選多條音軌。</li>
+    <li><b>剪下／複製／貼上／刪除</b>（Ctrl+X／C／V、Delete）會作用在選取的範圍，沒有範圍時則作用在選取的片段。剪下或刪除範圍會在邊緣把片段切開並留下空白（其他東西不會移動）；<b>裁切</b>則只保留範圍內的部分。</li>
+    <li><b>貼上</b>會貼到目前選取的音軌，位置是該音軌的選取範圍起點或播放頭；如果複製了多條音軌，其他的會依序貼到下方的音軌。音訊片段只能貼到音訊音軌，pattern 片段只能貼到樂器音軌，空白音軌兩種都可以，所以可以從一條錄音音軌剪下再貼到另一條。</li>
+    <li><b>〰 去除呼吸／雜音</b>（「音軌與編輯」卡片，選取音訊片段後）會找出樂句之間的呼吸聲和清痰／咳嗽並把它們降低。每一段都可以試聽處理前後的差別、取消勾選或切換類型；漏掉的可以用「範圍」工具選取後手動加入。</li>
+    <li><b>復原／重做</b>（Ctrl+Z、Ctrl+Shift+Z 或 Ctrl+Y）支援移動、修剪、切割、複製片段，剪下／貼上／刪除／裁切，打譜，標準化、反轉與去除雜音。</li>
   </ul>
 </section>
 <section>
   <h3>16. 快捷鍵</h3>
   <table>
-    <tr><td><kbd>空白鍵</kbd></td><td>播放／暫停</td></tr>
+    <tr><td><kbd>Space</kbd></td><td>播放／暫停</td></tr>
     <tr><td><kbd>Home</kbd></td><td>回到開頭</td></tr>
     <tr><td><kbd>R</kbd></td><td>開始／停止錄音</td></tr>
-    <tr><td><kbd>M</kbd>／<kbd>S</kbd></td><td>選取音軌的靜音／獨奏</td></tr>
-    <tr><td><kbd>B</kbd></td><td>在播放頭分割選取的音軌</td></tr>
-    <tr><td><kbd>↑</kbd>／<kbd>↓</kbd></td><td>選取上一條／下一條音軌</td></tr>
-    <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>儲存設定</td></tr>
-    <tr><td><kbd>V</kbd>／<kbd>E</kbd></td><td>移動工具／範圍工具</td></tr>
-    <tr><td><kbd>Ctrl</kbd>+<kbd>X</kbd>／<kbd>C</kbd>／<kbd>V</kbd></td><td>剪下／複製／貼上選取範圍</td></tr>
-    <tr><td><kbd>Delete</kbd></td><td>刪除選取範圍</td></tr>
-    <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd>／<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>復原／重做</td></tr>
-    <tr><td><kbd>Enter</kbd></td><td>開啟打譜編輯器（樂器音軌）</td></tr>
+    <tr><td><kbd>M</kbd> / <kbd>S</kbd></td><td>選取音軌靜音／獨奏</td></tr>
+    <tr><td><kbd>V</kbd> / <kbd>C</kbd> / <kbd>E</kbd></td><td>移動工具／切割工具／範圍工具</td></tr>
+    <tr><td><kbd>B</kbd></td><td>在播放頭切開選取的片段</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+拖曳</td><td>複製片段</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>選取所有片段</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>X</kbd> / <kbd>C</kbd> / <kbd>V</kbd></td><td>剪下／複製／貼上</td></tr>
+    <tr><td><kbd>Delete</kbd></td><td>刪除選取的內容</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>復原／重做</td></tr>
+    <tr><td><kbd>Enter</kbd></td><td>打開 pattern 編輯器（樂器音軌）</td></tr>
+    <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>選擇上一條／下一條音軌</td></tr>
     <tr><td><kbd>Esc</kbd></td><td>取消選取</td></tr>
-    <tr><td><kbd>?</kbd></td><td>開啟使用說明</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>儲存設定</td></tr>
+    <tr><td><kbd>?</kbd></td><td>打開使用說明</td></tr>
   </table>
 </section>`,
   },

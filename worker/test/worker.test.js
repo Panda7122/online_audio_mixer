@@ -114,6 +114,17 @@ test('projects lifecycle and audio cleanup', async () => {
   assert.equal((await call(sample.url)).status, 404);
 });
 
+test('audio used by clips survives deleting another project', async () => {
+  const take = await (await upload('Vocal take.wav', new Uint8Array(64))).json();
+  const settings = { tracks: [{ name: 'Vocal', kind: 'audio', clips: [{ type: 'audio', offset: 0, audioId: take.id }, { type: 'audio', offset: 8, audioId: take.id }] }] };
+  const a = await (await call('/api/projects', jsonInit('POST', { name: 'A', settings }))).json();
+  const b = await (await call('/api/projects', jsonInit('POST', { name: 'B', settings }))).json();
+  await call(`/api/projects/${a.id}`, { method: 'DELETE' });
+  assert.equal((await call(take.url)).status, 200, 'still used by clips of B');
+  await call(`/api/projects/${b.id}`, { method: 'DELETE' });
+  assert.equal((await call(take.url)).status, 404, 'removed with the last project');
+});
+
 test('strip presets', async () => {
   const r = await call('/api/strip-presets', jsonInit('POST', { name: 'Vox', role: 'vocal', strip: { eq: {}, comp: {}, junk: 1 } }));
   assert.equal(r.status, 201);

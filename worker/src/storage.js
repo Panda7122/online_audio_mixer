@@ -71,12 +71,15 @@ export async function updateProject(bucket, id, { name, settings }) {
   return p;
 }
 
-// Audio referenced by a project: track audio and uploaded instrument samples.
+// Audio referenced by a project: audio clips (and version-1 track audio) and uploaded instrument samples.
 export function audioIdsOf(p) {
   const ids = new Set();
   const tracks = p && p.settings && Array.isArray(p.settings.tracks) ? p.settings.tracks : [];
   for (const t of tracks) {
     if (t && isId(t.audioId)) ids.add(t.audioId);
+    // Version-2 projects keep audio in clips (any number per track).
+    const clips = t && Array.isArray(t.clips) ? t.clips : [];
+    for (const c of clips) if (c && isId(c.audioId)) ids.add(c.audioId);
     const zones = t && t.sampler && Array.isArray(t.sampler.zones) ? t.sampler.zones : [];
     for (const z of zones) if (z && isId(z.audioId)) ids.add(z.audioId);
   }

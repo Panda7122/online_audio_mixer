@@ -49,4 +49,4 @@ jobs:
         run: npm test
       - name: Deploy
         if: steps.creds.outputs.ok == 'true'
-        run: npx wrangler deploy
+        run: npx wrangler deploy --config wrangler.toml # explicit: a wrangler.json(c) in a parent folder would win otherwise

@@ -20,9 +20,10 @@
     { key: 'hs', kind: 'shelf', color: '#9b8cff' },
     { key: 'lpf', kind: 'pass', color: '#7bdff2' },
   ];
-  const CLIP_KEYS = ['offset', 'trimStart', 'trimEnd', 'fadeIn', 'fadeOut', 'clipGainDb', 'reversed'];
+  const CLIP_KEYS = ['offset', 'trimStart', 'trimEnd', 'fadeIn', 'fadeOut', 'clipGainDb', 'reversed', 'fileName', 'audioId'];
   const MIX_KEYS = ['volumeDb', 'pan', 'mute', 'solo', 'eq', 'comp', 'reverb', 'delay', 'presetSel'];
-  const TRACK_KEYS = ['name', 'role', 'color', 'kind', 'instrument', 'notes', 'sampler', 'fileName', 'audioId', ...CLIP_KEYS, ...MIX_KEYS];
+  const TRACK_KEYS = ['name', 'role', 'color', 'kind', 'instrument', 'sampler', ...MIX_KEYS];
+  const MIN_PAT = 1 / 16; // shortest pattern clip / pattern (beats)
   const MAX_NOTES = 50000;
   const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const STRIP_KEYS = ['volumeDb', 'pan', 'eq', 'comp', 'reverb', 'delay', 'presetSel'];
@@ -47,6 +48,9 @@
     tracks: [],
     selectedId: null,
     nextId: 1,
+    nextClipId: 1,
+    patterns: [], // { id, name, len (beats), notes: [{ t, d, p, v }] }, shared by the clips that play them
+    nextPatternId: 1,
     bpm: 120,
     pps: 60, // timeline pixels per second
     snap: false,
@@ -72,10 +76,13 @@
     sepOpts: { model: 'htdemucs', shifts: 1, stems: null, muteOriginal: true, autoMix: true },
     clean: null, // open clean-up dialog: { trackId, baked, feats, regions, progress }
     cleanOpts: { sens: 50, breathDb: -20, noiseDb: -60 }, // last used clean-up settings
-    tool: 'move', // timeline tool: 'move' (move/trim clips) or 'range' (select audio ranges)
-    sel: null, // { trackId, kind: 'notes', b0, b1 (beats) } or { trackId, kind: 'audio', t0, t1 (seconds) }
-    selAnchor: 0,
-    clipboard: null, // { kind: 'notes', len, notes } or { kind: 'audio', buffer }
+    tool: 'move', // timeline tool: 'move' (select/move/trim clips), 'slice' (split clips) or 'range' (select a time range)
+    sel: null, // selected time range: { t0, t1 (seconds), ids: [track ids] }
+    selClips: new Set(), // selected clips
+    focus: null, // clip shown in the inspector
+    clipUi: new Map(), // clip -> { el, cv, label, tr } of the rendered timeline
+    clipboard: null, // { items: [{ row, kind, from: { instrument, sampler }, clip }] }
+    noteClipboard: null, // pattern editor: { notes, span }
     undo: [],
     redo: [],
     noteTimer: null,
@@ -184,7 +191,15 @@
     return out;
   }
 
-  /* ---------- Track model ---------- */
+  /* ---------- Track model ----------
+   * A track is a mixer channel that holds any number of clips:
+   *   audio clip:   { id, type: 'audio', buffer, peaks, source, audioId, fileName,
+   *                   offset, trimStart, trimEnd, fadeIn, fadeOut, clipGainDb, reversed }   (seconds)
+   *   pattern clip: { id, type: 'pattern', pattern (pattern id), start, len, from }          (beats)
+   * A pattern clip plays its pattern from beat `from`, looping it when the clip is longer than the pattern.
+   * Patterns ({ id, name, len, notes }) are shared: every clip of a pattern plays the same notes.
+   * Audio tracks hold audio clips, instrument tracks ('notes') hold pattern clips; an empty track takes either.
+   */
   function defaultMix() {
     return {
       volumeDb: 0,
@@ -206,23 +221,10 @@
       name: name || t('trackN', { n: id }),
       role: role || 'other',
       color: COLORS[(id - 1) % COLORS.length],
-      buffer: null,
-      peaks: null,
-      fileName: '',
-      offset: 0,
-      trimStart: 0,
-      trimEnd: 0,
-      fadeIn: 0,
-      fadeOut: 0,
-      clipGainDb: 0,
-      reversed: false,
-      keepClip: false,
-      source: null, // original File/Blob, uploaded when saving to the server
-      audioId: null, // id of the audio on the server
       kind: kind === 'notes' ? 'notes' : 'audio', // 'audio' clip track or 'notes' instrument track
       instrument: 'piano',
-      notes: [], // instrument tracks: { t: start beat, d: length in beats, p: MIDI pitch, v: velocity }
       sampler: defaultSampler(), // uploaded sounds for the custom instruments
+      clips: [],
       ui: {},
     }, defaultMix());
     tr.channel = new DSP.Channel(S.ctx, S.master.input);
@@ -234,8 +236,42 @@
   }
 
   const selected = () => S.tracks.find(x => x.id === S.selectedId) || null;
-  const clipLen = tr => Math.max(0, tr.trimEnd - tr.trimStart);
-  const clipEnd = tr => tr.offset + clipLen(tr);
+  const beatSec = () => 60 / S.bpm;
+  const barSec = () => 4 * beatSec();
+  const isPat = c => c.type === 'pattern';
+  const clipKind = c => (isPat(c) ? 'notes' : 'audio');
+  const clipLen = c => (isPat(c) ? c.len * beatSec() : Math.max(0, c.trimEnd - c.trimStart));
+  const clipStart = c => (isPat(c) ? c.start * beatSec() : c.offset);
+  const clipEnd = c => clipStart(c) + clipLen(c);
+  const trackOf = c => S.tracks.find(x => x.clips.includes(c)) || null;
+  const audioClips = tr => tr.clips.filter(c => !isPat(c));
+  const getPattern = id => S.patterns.find(p => p.id === id) || null;
+  const findClip = id => { for (const x of S.tracks) for (const c of x.clips) if (c.id === id) return c; return null; };
+
+  function newAudioClip(buffer, o = {}) {
+    const c = {
+      id: S.nextClipId++, type: 'audio', buffer: null, peaks: null,
+      source: o.source || null, // original File/Blob, uploaded when saving to the server
+      audioId: o.audioId || null, // id of the audio on the server
+      fileName: o.fileName || '',
+      offset: Math.max(0, o.offset || 0), trimStart: 0, trimEnd: 0, fadeIn: 0, fadeOut: 0, clipGainDb: 0, reversed: false,
+    };
+    if (buffer) setClipBuffer(c, buffer, true);
+    return c;
+  }
+
+  function newPatternClip(patternId, start, len, from) {
+    return { id: S.nextClipId++, type: 'pattern', pattern: patternId, start: Math.max(0, start), len: Math.max(MIN_PAT, len), from: Math.max(0, from || 0) };
+  }
+
+  const copyClip = c => Object.assign({}, c, { id: S.nextClipId++ });
+
+  function createPattern(name, len) {
+    const id = S.nextPatternId++;
+    const p = { id, name: name || t('patternN', { n: id }), len: Math.max(MIN_PAT, len || 4), notes: [] };
+    S.patterns.push(p);
+    return p;
+  }
 
   function applyChannel(tr) { tr.channel.apply(tr, S.bpm); }
 
@@ -244,37 +280,58 @@
     for (const x of S.tracks) x.channel.setAudible(!x.mute && (!anySolo || x.solo));
   }
 
-  function clampClip(tr) {
-    if (tr.buffer) {
-      const d = tr.buffer.duration;
-      tr.trimStart = clamp(tr.trimStart, 0, Math.max(0, d - MIN_CLIP));
-      tr.trimEnd = clamp(tr.trimEnd, tr.trimStart + MIN_CLIP, d);
+  function clampClip(c) {
+    if (isPat(c)) {
+      c.start = Math.max(0, c.start);
+      c.len = Math.max(MIN_PAT, c.len);
+      c.from = Math.max(0, c.from);
+      return;
     }
-    tr.offset = Math.max(0, tr.offset);
-    const len = clipLen(tr);
-    tr.fadeIn = clamp(tr.fadeIn, 0, len);
-    tr.fadeOut = clamp(tr.fadeOut, 0, len - tr.fadeIn);
+    if (c.buffer) {
+      const d = c.buffer.duration;
+      c.trimStart = clamp(c.trimStart, 0, Math.max(0, d - MIN_CLIP));
+      c.trimEnd = clamp(c.trimEnd, c.trimStart + MIN_CLIP, d);
+    }
+    c.offset = Math.max(0, c.offset);
+    const len = clipLen(c);
+    c.fadeIn = clamp(c.fadeIn, 0, len);
+    c.fadeOut = clamp(c.fadeOut, 0, len - c.fadeIn);
   }
 
-  function setTrackBuffer(tr, buffer, fileName) {
-    const keep = tr.keepClip; // clip settings came from a loaded settings file
-    tr.keepClip = false;
-    if (keep && tr.reversed) buffer = DSP.reversed(S.ctx, buffer);
-    if (!keep) {
-      tr.reversed = false;
-      tr.trimStart = 0;
-      tr.trimEnd = buffer.duration;
-      tr.fadeIn = tr.fadeOut = 0;
-      tr.clipGainDb = 0;
-    } else if (tr.trimEnd <= tr.trimStart || tr.trimEnd > buffer.duration + 1e-3) {
-      tr.trimStart = 0;
-      tr.trimEnd = buffer.duration;
+  // Give a clip its audio. `fresh`: whole file, no edits. Otherwise keep the clip's edits (from a saved file);
+  // `buffer` is then the original audio and is reversed here if the clip is.
+  function setClipBuffer(c, buffer, fresh) {
+    if (fresh) {
+      c.reversed = false;
+      c.trimStart = 0;
+      c.trimEnd = buffer.duration;
+      c.fadeIn = c.fadeOut = 0;
+      c.clipGainDb = 0;
+    } else {
+      if (c.reversed) buffer = DSP.reversed(S.ctx, buffer);
+      if (c.trimEnd <= c.trimStart || c.trimEnd > buffer.duration + 1e-3) { c.trimStart = 0; c.trimEnd = buffer.duration; }
     }
-    tr.buffer = buffer;
-    tr.peaks = DSP.computePeaks(buffer, PEAK_BLOCK);
-    tr.loudCache = null;
-    if (fileName) tr.fileName = fileName;
-    clampClip(tr);
+    c.buffer = buffer;
+    c.peaks = DSP.computePeaks(buffer, PEAK_BLOCK);
+    c.loudCache = null;
+    clampClip(c);
+  }
+
+  // Can `tr` take clips of `kind`? An empty track (ignoring the clips in `except`) takes either kind.
+  function canHold(tr, kind, except) {
+    if (!tr || (S.recording && S.recording.target === tr)) return false;
+    return tr.kind === kind || tr.clips.every(c => except && except.has(c));
+  }
+
+  // Switch an (empty) track to `kind`; a new instrument track takes the instrument the clips came from.
+  function adoptKind(tr, kind, from) {
+    if (tr.kind === kind) return;
+    tr.kind = kind;
+    if (kind === 'notes' && from) {
+      tr.instrument = from.instrument;
+      tr.sampler = copySampler(from.sampler);
+      if (tr.role === 'other') tr.role = Synth.INSTRUMENTS[tr.instrument].role;
+    }
   }
 
   function detectRole(name) {
@@ -289,42 +346,97 @@
 
   const isAudioFile = f => /^audio\//.test(f.type) || /\.(wav|mp3|ogg|oga|flac|m4a|aac|webm|opus)$/i.test(f.name);
 
-  async function addAudioFiles(files) {
+  // Give the audio of a file to clips that are waiting for it (settings loaded before the audio).
+  function fillMissing(fileName, buffer, source) {
+    let n = 0;
+    for (const tr of S.tracks) {
+      for (const c of audioClips(tr)) {
+        if (c.buffer || c.fileName !== fileName) continue;
+        setClipBuffer(c, buffer, false);
+        c.source = source;
+        c.audioId = null;
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /*
+   * Add audio files: each as a new track, or with `target` as clips on that track, placed one after
+   * another from `at` (seconds). Files that clips are waiting for fill those clips instead.
+   */
+  async function addAudioFiles(files, target, at) {
     files = files.filter(isAudioFile);
     if (!files.length) return;
     toast(t('loading'));
-    let added = 0;
+    let added = 0, onTrack = 0, filled = 0, pos = at || 0, undoPushed = false;
+    const placed = [];
     for (const f of files) {
       try {
         const buf = await decodeFile(f);
         const name = f.name.replace(/\.[^.]+$/, '');
-        const tr = createTrack(name, detectRole(name));
-        setTrackBuffer(tr, buf, f.name);
-        tr.source = f;
-        S.selectedId = tr.id;
+        const n = fillMissing(f.name, buf, f);
+        if (n) { filled += n; continue; }
+        if (target && canHold(target, 'audio')) {
+          if (!undoPushed) { pushUndo(t('undoAddClip')); undoPushed = true; }
+          adoptKind(target, 'audio');
+          const c = newAudioClip(buf, { fileName: f.name, source: f, offset: pos });
+          target.clips.push(c);
+          placed.push(c);
+          pos = clipEnd(c);
+          S.selectedId = target.id;
+          onTrack++;
+        } else {
+          const tr = createTrack(name, detectRole(name));
+          const c = newAudioClip(buf, { fileName: f.name, source: f });
+          tr.clips.push(c);
+          placed.push(c);
+          S.selectedId = tr.id;
+        }
         added++;
       } catch (e) {
         console.error(e);
         toast(t('decodeFail', { name: f.name }));
       }
     }
+    if (placed.length) { S.selClips = new Set(placed); S.focus = placed[placed.length - 1]; }
     renderAll();
-    if (added) toast(t('filesAdded', { n: added }));
+    restartSoon();
+    updateEditButtons();
+    const msg = [];
+    if (added - onTrack) msg.push(t('filesAdded', { n: added - onTrack }));
+    if (onTrack) msg.push(t('clipsAdded', { n: onTrack, name: target.name }));
+    if (filled) msg.push(t('clipsFilled', { n: filled }));
+    if (msg.length) toast(msg.join(' '), 4500);
   }
 
+  // Track ⇪ button: fill the track's first clip that is missing its audio, or add the file at the playhead.
   async function loadAudioIntoTrack(tr) {
+    const missing = audioClips(tr).find(c => !c.buffer);
+    if (missing && tr.kind === 'audio') { loadAudioIntoClip(missing); return; }
+    const [f] = await pickFiles($('#fileOne'));
+    if (!f) return;
+    const empty = !tr.clips.length;
+    await addAudioFiles([f], tr, position());
+    if (empty && /^(Track|音軌) \d+$/.test(tr.name)) {
+      tr.name = f.name.replace(/\.[^.]+$/, '');
+      if (tr.role === 'other') tr.role = detectRole(tr.name);
+      renderAll();
+    }
+  }
+
+  // Load a file into a clip that has no audio (and into other clips waiting for the same file).
+  async function loadAudioIntoClip(c) {
     const [f] = await pickFiles($('#fileOne'));
     if (!f) return;
     try {
       const buf = await decodeFile(f);
-      if (S.playing) stopVoices(tr);
-      setTrackBuffer(tr, buf, f.name);
-      tr.source = f;
-      tr.audioId = null;
-      if (/^(Track|音軌) \d+$/.test(tr.name)) {
-        tr.name = f.name.replace(/\.[^.]+$/, '');
-        if (tr.role === 'other') tr.role = detectRole(tr.name);
-      }
+      const want = c.fileName;
+      setClipBuffer(c, buf, false);
+      c.source = f;
+      c.audioId = null;
+      if (want) fillMissing(want, buf, f);
+      c.fileName = f.name;
       renderAll();
       restartSoon();
     } catch (e) {
@@ -333,72 +445,92 @@
     }
   }
 
-  /* ---------- Track editing operations ---------- */
+  /* ---------- Track and clip editing operations ---------- */
   function deleteTrack(tr) {
     if (!confirm(t('confirmDelete', { name: tr.name }))) return;
     if (S.recording && S.recording.target === tr) finishRecording();
     stopVoices(tr);
     tr.channel.disconnect();
     S.tracks.splice(S.tracks.indexOf(tr), 1);
-    if (S.sel && S.sel.trackId === tr.id) setSelection(null);
+    for (const c of tr.clips) { S.selClips.delete(c); if (S.focus === c) S.focus = null; }
+    if (S.sel) {
+      S.sel.ids = S.sel.ids.filter(id => id !== tr.id);
+      if (!S.sel.ids.length) S.sel = null;
+    }
     if (S.selectedId === tr.id) S.selectedId = S.tracks.length ? S.tracks[0].id : null;
     updateAudibility();
     renderAll();
+    updateEditButtons();
   }
 
   function duplicateTrack(tr, nameSuffix) {
-    const copy = createTrack(tr.name + nameSuffix, tr.role, S.tracks.indexOf(tr) + 1);
-    for (const k of [...CLIP_KEYS, ...MIX_KEYS, 'fileName', 'kind', 'instrument', 'notes']) copy[k] = clone(tr[k]);
+    const copy = createTrack(tr.name + nameSuffix, tr.role, S.tracks.indexOf(tr) + 1, tr.kind);
+    for (const k of MIX_KEYS) copy[k] = clone(tr[k]);
+    copy.instrument = tr.instrument;
     copy.sampler = copySampler(tr.sampler);
-    copy.buffer = tr.buffer; // buffers are never mutated, so sharing is safe
-    copy.peaks = tr.peaks;
-    copy.source = tr.source;
-    copy.audioId = tr.audioId;
+    copy.clips = tr.clips.map(copyClip); // audio buffers are never mutated and patterns are shared
     applyChannel(copy);
     updateAudibility();
     return copy;
   }
 
-  function normalizeTrack(tr) {
-    if (!tr.buffer) return;
-    const pk = DSP.peakDb(tr.buffer, tr.trimStart, tr.trimEnd);
+  function normalizeClip(c) {
+    if (!c.buffer) return;
+    const pk = DSP.peakDb(c.buffer, c.trimStart, c.trimEnd);
     if (!Number.isFinite(pk)) return;
-    pushUndo(t('normalize'), [tr]);
-    tr.clipGainDb = round(clamp(-1 - pk, -24, 24), 2);
-    afterClip(tr);
-    toast(t('normalized', { db: fmtDb(tr.clipGainDb) }));
+    pushUndo(t('normalize'));
+    c.clipGainDb = round(clamp(-1 - pk, -24, 24), 2);
+    afterClip(c);
+    toast(t('normalized', { db: fmtDb(c.clipGainDb) }));
   }
 
-  function reverseTrack(tr) {
-    if (!tr.buffer) return;
-    pushUndo(t('reverse'), [tr]);
-    const d = tr.buffer.duration;
-    tr.buffer = DSP.reversed(S.ctx, tr.buffer);
-    tr.peaks = DSP.computePeaks(tr.buffer, PEAK_BLOCK);
-    [tr.trimStart, tr.trimEnd] = [d - tr.trimEnd, d - tr.trimStart];
-    [tr.fadeIn, tr.fadeOut] = [tr.fadeOut, tr.fadeIn];
-    tr.reversed = !tr.reversed;
-    if (S.playing) stopVoices(tr);
-    afterClip(tr);
+  function reverseClip(c) {
+    if (!c.buffer) return;
+    pushUndo(t('reverse'));
+    const d = c.buffer.duration;
+    c.buffer = DSP.reversed(S.ctx, c.buffer);
+    c.peaks = DSP.computePeaks(c.buffer, PEAK_BLOCK);
+    [c.trimStart, c.trimEnd] = [d - c.trimEnd, d - c.trimStart];
+    [c.fadeIn, c.fadeOut] = [c.fadeOut, c.fadeIn];
+    c.reversed = !c.reversed;
+    afterClip(c);
   }
 
-  function splitTrack(tr) {
-    const pos = position();
-    if (!tr.buffer || pos <= tr.offset + MIN_CLIP || pos >= clipEnd(tr) - MIN_CLIP) {
-      toast(t('splitOutside'));
-      return;
+  // Split a clip at timeline time `ts` (seconds). The clip keeps the left part; returns the new right part.
+  function splitClip(c, ts) {
+    const tr = trackOf(c);
+    if (!tr || ts <= clipStart(c) + 1e-4 || ts >= clipEnd(c) - 1e-4) return null;
+    const r = copyClip(c);
+    if (isPat(c)) {
+      const cut = ts / beatSec() - c.start;
+      r.start = c.start + cut;
+      r.from = c.from + cut;
+      r.len = c.len - cut;
+      c.len = cut;
+    } else {
+      const cut = c.trimStart + (ts - c.offset);
+      r.offset = ts;
+      r.trimStart = cut;
+      r.fadeIn = 0;
+      c.trimEnd = cut;
+      c.fadeOut = 0;
+      r.fadeOut = Math.min(r.fadeOut, clipLen(r));
+      c.fadeIn = Math.min(c.fadeIn, clipLen(c));
     }
-    const cut = tr.trimStart + (pos - tr.offset);
-    const right = duplicateTrack(tr, t('partSuffix'));
-    right.trimStart = cut;
-    right.offset = pos;
-    right.fadeIn = 0;
-    tr.trimEnd = cut;
-    tr.fadeOut = 0;
-    clampClip(tr);
-    clampClip(right);
-    renderAll();
-    restartSoon();
+    tr.clips.splice(tr.clips.indexOf(c) + 1, 0, r);
+    return r;
+  }
+
+  // B: split the selected clips (or every clip of the selected track) at the playhead.
+  function splitAtPlayhead(only) {
+    const pos = position();
+    let list = only ? [only] : [...S.selClips];
+    if (!list.length) { const tr = selected(); if (tr) list = tr.clips.slice(); }
+    list = list.filter(c => pos > clipStart(c) + 1e-3 && pos < clipEnd(c) - 1e-3);
+    if (!list.length) { toast(t('splitOutside')); return; }
+    pushUndo(t('split'));
+    for (const c of list) splitClip(c, pos);
+    afterEdit();
   }
 
   function moveTrack(tr, dir) {
@@ -412,21 +544,28 @@
   const genreDef = () => PRESETS.genres[S.genre] || PRESETS.genres.pop;
   const roleTpl = role => genreDef().roles[role] || genreDef().roles.other;
 
+  // Loudness (RMS dBFS, clip gain included) of a track's audio clips, weighted by clip length.
   function trackLoudness(tr) {
-    const key = `${tr.trimStart}|${tr.trimEnd}|${tr.buffer.length}|${tr.reversed}`;
-    if (!tr.loudCache || tr.loudCache.key !== key) {
-      tr.loudCache = { key, val: DSP.loudness(tr.buffer, tr.trimStart, tr.trimEnd) };
+    let energy = 0, total = 0;
+    for (const c of audioClips(tr)) {
+      if (!c.buffer) continue;
+      const key = `${c.trimStart}|${c.trimEnd}|${c.buffer.length}`;
+      if (!c.loudCache || c.loudCache.key !== key) c.loudCache = { key, val: DSP.loudness(c.buffer, c.trimStart, c.trimEnd) };
+      if (c.loudCache.val == null) continue;
+      const len = clipLen(c);
+      energy += len * 10 ** ((c.loudCache.val + c.clipGainDb) / 10);
+      total += len;
     }
-    return tr.loudCache.val;
+    return total ? 10 * Math.log10(energy / total) : null;
   }
 
   // Fader value that brings the track to the role's target loudness for the current genre.
   function autoLevel(tr) {
     const tpl = roleTpl(tr.role);
-    if (!tr.buffer) return round(clamp(tpl.level + 18, -30, 12)); // assume a nominal -18 dBFS source
+    if (!audioClips(tr).some(c => c.buffer)) return round(clamp(tpl.level + 18, -30, 12)); // assume a nominal -18 dBFS source
     const rms = trackLoudness(tr);
     if (rms == null) return 0;
-    return round(clamp(tpl.level - (rms + tr.clipGainDb), -40, 12));
+    return round(clamp(tpl.level - rms, -40, 12));
   }
 
   function autoPan(tr) {
@@ -503,17 +642,35 @@
     return Math.max(S.startPos, S.startPos + S.ctx.currentTime - S.startCtxTime);
   }
 
-  const beatSec = () => 60 / S.bpm;
-  const barSec = () => 4 * beatSec();
-  const notesEnd = tr => tr.notes.reduce((m, n) => Math.max(m, (n.t + n.d) * beatSec()), 0);
-
   function projectEnd() {
     let end = 0;
-    for (const tr of S.tracks) {
-      if (tr.buffer) end = Math.max(end, clipEnd(tr));
-      else if (tr.kind === 'notes' && tr.notes.length) end = Math.max(end, notesEnd(tr));
-    }
+    for (const tr of S.tracks) for (const c of tr.clips) if (isPat(c) || c.buffer) end = Math.max(end, clipEnd(c));
     return end;
+  }
+
+  /*
+   * Notes a pattern clip plays, in absolute beats and cut at the clip end: the ones starting in [b0, b1),
+   * or with `sounding` also the ones that started earlier and still sound at b0.
+   */
+  function clipNotes(c, b0, b1, sounding) {
+    const p = getPattern(c.pattern);
+    const out = [];
+    if (!p || !p.notes.length) return out;
+    const L = Math.max(MIN_PAT, p.len), cs = c.start, ce = c.start + c.len, base = cs - c.from;
+    for (const n of p.notes) {
+      if (n.t >= L - NOTE_EPS) continue; // past the pattern end
+      const lo = Math.max(cs, sounding ? b0 - n.d : b0), hi = Math.min(b1, ce);
+      if (hi <= lo) continue;
+      for (let k = Math.ceil((lo - base - n.t) / L - NOTE_EPS); ; k++) {
+        const st = base + n.t + k * L;
+        if (st >= hi - NOTE_EPS) break;
+        if (st < cs - NOTE_EPS) continue;
+        const d = Math.min(n.d, ce - st);
+        if (st < b0 - NOTE_EPS && st + d <= b0 + NOTE_EPS) continue;
+        out.push({ t: st, d, p: n.p, v: n.v });
+      }
+    }
+    return out;
   }
 
   function startVoices(fromPos) {
@@ -522,9 +679,10 @@
     S.startPos = fromPos;
     S.voices = [];
     for (const tr of S.tracks) {
-      if (!tr.buffer) continue;
-      const v = DSP.scheduleClip(S.ctx, tr, tr.channel.input, when, fromPos);
-      if (v) {
+      for (const c of tr.clips) {
+        if (isPat(c) || !c.buffer) continue;
+        const v = DSP.scheduleClip(S.ctx, c, tr.channel.input, when, fromPos);
+        if (!v) continue;
         S.voices.push({
           tr,
           end: Infinity,
@@ -550,16 +708,17 @@
     if (to <= from && !initial) return;
     const spb = beatSec();
     for (const tr of S.tracks) {
-      if (tr.kind !== 'notes' || !tr.notes.length) continue;
-      for (const n of tr.notes) {
-        const ts = n.t * spb, te = (n.t + n.d) * spb;
-        // First pass also starts notes that are already sounding at the start position.
-        const hit = initial ? ts < to && te > from : ts >= from && ts < to;
-        if (!hit) continue;
-        const start = Math.max(ts, from);
-        const v = Synth.play(S.ctx, tr.channel.input, tr.instrument, n.p, n.v, S.startCtxTime + (start - S.startPos), Math.max(0.02, te - start), tr.sampler);
-        v.tr = tr;
-        S.voices.push(v);
+      if (tr.kind !== 'notes') continue;
+      for (const c of tr.clips) {
+        if (!isPat(c)) continue;
+        // The first pass also starts notes that are already sounding at the start position.
+        for (const n of clipNotes(c, from / spb, to / spb, initial)) {
+          const ts = n.t * spb, te = (n.t + n.d) * spb;
+          const start = Math.max(ts, from);
+          const v = Synth.play(S.ctx, tr.channel.input, tr.instrument, n.p, n.v, S.startCtxTime + (start - S.startPos), Math.max(0.02, te - start), tr.sampler);
+          v.tr = tr;
+          S.voices.push(v);
+        }
       }
     }
     S.noteCursor = to;
@@ -652,7 +811,7 @@
     }
     await S.ctx.resume();
     let target = selected();
-    if (!target || target.buffer || target.kind !== 'audio') {
+    if (!target || !canHold(target, 'audio')) {
       target = createTrack(t('recordingName', { n: ++S.recCount }), 'vocal');
     }
     S.selectedId = target.id;
@@ -696,19 +855,17 @@
     try {
       const blob = new Blob(R.chunks, { type: R.rec.mimeType || 'audio/webm' });
       const buf = await S.ctx.decodeAudioData(await blob.arrayBuffer());
-      tr.keepClip = false;
       const mime = R.rec.mimeType || '';
       const ext = /ogg/.test(mime) ? 'ogg' : /mp4|aac/.test(mime) ? 'm4a' : 'webm';
-      setTrackBuffer(tr, buf, `${safeName(tr.name)}.${ext}`);
-      tr.source = blob;
-      tr.audioId = null;
-      if (R.tlStart < 0) {
-        tr.offset = 0;
-        tr.trimStart = Math.min(-R.tlStart, buf.duration - MIN_CLIP);
-      } else {
-        tr.offset = R.tlStart;
-      }
-      clampClip(tr);
+      const c = newAudioClip(buf, { fileName: `${safeName(tr.name)}.${ext}`, source: blob, offset: Math.max(0, R.tlStart) });
+      if (R.tlStart < 0) c.trimStart = Math.min(-R.tlStart, buf.duration - MIN_CLIP);
+      clampClip(c);
+      pushUndo(t('undoRecord'));
+      adoptKind(tr, 'audio');
+      tr.clips.push(c);
+      S.selClips = new Set([c]);
+      S.focus = c;
+      updateEditButtons();
       toast(t('recDone'));
     } catch (e) {
       console.error(e);
@@ -729,17 +886,25 @@
     return o;
   }
 
+  function serializeClip(c) {
+    if (isPat(c)) return { type: 'pattern', pattern: c.pattern, start: c.start, len: c.len, from: c.from };
+    const o = { type: 'audio' };
+    for (const k of CLIP_KEYS) o[k] = c[k];
+    return o;
+  }
+
   function buildSettings() {
     return {
       app: 'online-audio-mixer',
       type: 'mix-settings',
-      version: 1,
+      version: 2,
       savedAt: new Date().toISOString(),
       bpm: S.bpm,
       genre: S.genre,
       panMode: S.panMode,
       master: { volumeDb: S.masterVolumeDb, limiter: S.limiter },
-      tracks: S.tracks.map(tr => serializeTrack(tr, TRACK_KEYS)),
+      tracks: S.tracks.map(tr => Object.assign(serializeTrack(tr, TRACK_KEYS), { clips: tr.clips.map(serializeClip) })),
+      patterns: S.patterns.map(p => ({ id: p.id, name: p.name, len: p.len, notes: p.notes.map(n => ({ t: n.t, d: n.d, p: n.p, v: n.v })) })),
     };
   }
 
@@ -755,8 +920,64 @@
     toast(t('stripSaved'));
   }
 
-  // Copy mix (and optionally clip) settings from a parsed object into a track.
-  function applyTrackSettings(tr, o, withClip) {
+  // Audio that is already loaded, so a loaded settings file can reuse it (by server id or file name).
+  function audioLibrary() {
+    const lib = new Map();
+    for (const tr of S.tracks) {
+      for (const c of audioClips(tr)) {
+        if (!c.buffer || !(c.source || c.audioId)) continue; // edited audio no longer matches its file
+        const e = { source: c.source, audioId: c.audioId, original: () => (c.reversed ? DSP.reversed(S.ctx, c.buffer) : c.buffer) };
+        if (c.audioId) lib.set('id:' + c.audioId, e);
+        if (c.fileName && c.source) lib.set('f:' + c.fileName, e);
+      }
+    }
+    return lib;
+  }
+
+  // Clips of a saved track. Version-1 files kept one clip (or all notes) directly on the track.
+  function parseClips(o, patMap, lib) {
+    let list = Array.isArray(o.clips) ? o.clips : null;
+    if (!list) {
+      if (o.kind === 'notes') {
+        const notes = sanitizeNotes(o.notes);
+        if (!notes.length) return [];
+        const end = notes.reduce((m, n) => Math.max(m, n.t + n.d), 0);
+        const p = createPattern(typeof o.name === 'string' ? o.name.slice(0, 80) : null, Math.max(4, Math.ceil(end / 4 - NOTE_EPS) * 4));
+        p.notes = notes;
+        return [newPatternClip(p.id, 0, p.len, 0)];
+      }
+      const hasClip = (typeof o.audioId === 'string' && o.audioId) || o.fileName || (Number.isFinite(o.trimEnd) && o.trimEnd > 0);
+      list = hasClip ? [Object.assign({ type: 'audio' }, o)] : [];
+    }
+    const num = (v, d) => (Number.isFinite(+v) ? +v : d);
+    const out = [];
+    for (const x of list.slice(0, 5000)) {
+      if (!x || typeof x !== 'object') continue;
+      if (x.type === 'pattern') {
+        const pid = patMap.get(x.pattern);
+        if (pid == null) continue;
+        out.push(newPatternClip(pid, num(x.start, 0), num(x.len, 4), num(x.from, 0)));
+        continue;
+      }
+      const c = newAudioClip(null);
+      for (const k of ['offset', 'trimStart', 'trimEnd', 'fadeIn', 'fadeOut', 'clipGainDb']) if (Number.isFinite(x[k])) c[k] = x[k];
+      c.reversed = !!x.reversed;
+      c.fileName = typeof x.fileName === 'string' ? x.fileName.slice(0, 200) : '';
+      c.audioId = typeof x.audioId === 'string' && ID_RE.test(x.audioId) ? x.audioId : null;
+      const known = lib && ((c.audioId && lib.get('id:' + c.audioId)) || (c.fileName && lib.get('f:' + c.fileName)));
+      if (known) {
+        setClipBuffer(c, known.original(), false);
+        c.source = known.source;
+        if (!c.audioId) c.audioId = known.audioId;
+      }
+      clampClip(c);
+      out.push(c);
+    }
+    return out;
+  }
+
+  // Copy mix settings (and with `full` also name, instrument and clips) from a parsed object into a track.
+  function applyTrackSettings(tr, o, full, patMap, lib) {
     const def = defaultMix();
     tr.volumeDb = Number.isFinite(o.volumeDb) ? clamp(o.volumeDb, -60, 12) : def.volumeDb;
     tr.pan = Number.isFinite(o.pan) ? clamp(o.pan, -1, 1) : def.pan;
@@ -765,34 +986,17 @@
     tr.reverb = mergeShape(def.reverb, o.reverb);
     tr.delay = mergeShape(def.delay, o.delay);
     tr.presetSel = mergeShape(def.presetSel, o.presetSel);
-    if (!withClip) return;
+    if (!full) return;
     if (typeof o.name === 'string' && o.name) tr.name = o.name.slice(0, 80);
     if (ROLES.includes(o.role)) tr.role = o.role;
     if (typeof o.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(o.color)) tr.color = o.color;
-    if (typeof o.fileName === 'string') tr.fileName = o.fileName;
-    // Audio stored on the backend; fetched later for tracks that have no audio yet.
-    if (!tr.buffer && typeof o.audioId === 'string' && ID_RE.test(o.audioId)) tr.audioId = o.audioId;
     tr.mute = !!o.mute;
     tr.solo = !!o.solo;
-    tr.kind = o.kind === 'notes' && !tr.buffer ? 'notes' : 'audio';
+    tr.kind = o.kind === 'notes' ? 'notes' : 'audio';
     if (Synth.INSTRUMENTS[o.instrument]) tr.instrument = o.instrument;
-    tr.notes = sanitizeNotes(o.notes);
     tr.sampler = parseSampler(o.sampler, tr.sampler);
-    const wantReversed = !!o.reversed;
-    if (tr.buffer && wantReversed !== tr.reversed) {
-      tr.buffer = DSP.reversed(S.ctx, tr.buffer);
-      tr.peaks = DSP.computePeaks(tr.buffer, PEAK_BLOCK);
-    }
-    tr.reversed = wantReversed;
-    for (const k of ['offset', 'trimStart', 'trimEnd', 'fadeIn', 'fadeOut', 'clipGainDb']) {
-      if (Number.isFinite(o[k])) tr[k] = o[k];
-    }
-    if (tr.buffer) {
-      if (tr.trimEnd <= tr.trimStart || tr.trimEnd > tr.buffer.duration + 1e-3) { tr.trimStart = 0; tr.trimEnd = tr.buffer.duration; }
-      clampClip(tr);
-    } else {
-      tr.keepClip = true; // keep these clip settings until audio is loaded
-    }
+    if (S.playing) stopVoices(tr);
+    tr.clips = parseClips(o, patMap, lib).filter(c => clipKind(c) === tr.kind);
   }
 
   async function loadProject(o) {
@@ -805,8 +1009,18 @@
       if (Number.isFinite(o.master.volumeDb)) S.masterVolumeDb = clamp(o.master.volumeDb, -30, 6);
       S.limiter = o.master.limiter !== false;
     }
+    const lib = audioLibrary();
+    const oldPatterns = new Set(S.patterns.map(p => p.id));
+    // Patterns get new ids; the ids in the file only link its clips to its patterns.
+    const patMap = new Map();
+    for (const p of Array.isArray(o.patterns) ? o.patterns.slice(0, 2000) : []) {
+      if (!p || typeof p !== 'object' || patMap.has(p.id)) continue;
+      const np = createPattern(typeof p.name === 'string' && p.name ? p.name.slice(0, 80) : null, clamp(+p.len || 4, MIN_PAT, 4096));
+      np.notes = sanitizeNotes(p.notes);
+      patMap.set(p.id, np.id);
+    }
     const list = Array.isArray(o.tracks) ? o.tracks : [];
-    // Pass 1: match by track name. Pass 2: match remaining by order. Extra entries create empty tracks.
+    // Pass 1: match by track name. Pass 2: match remaining by order. Extra entries create new tracks.
     const assigned = new Array(list.length).fill(null);
     const used = new Set();
     list.forEach((ts, i) => {
@@ -819,16 +1033,26 @@
       assigned[i] = free.shift() || createTrack(ts.name, ROLES.includes(ts.role) ? ts.role : 'other');
     });
     list.forEach((ts, i) => {
-      applyTrackSettings(assigned[i], ts, true);
+      applyTrackSettings(assigned[i], ts, true, patMap, lib);
       applyChannel(assigned[i]);
     });
+    // Drop old patterns that no clip plays any more.
+    const playing = new Set(S.tracks.flatMap(x => x.clips.filter(isPat).map(c => c.pattern)));
+    S.patterns = S.patterns.filter(p => !oldPatterns.has(p.id) || playing.has(p.id));
+    S.selClips = new Set();
+    S.focus = null;
+    S.sel = null;
+    S.undo = [];
+    S.redo = [];
+    updateEditButtons();
     S.master.apply({ volumeDb: S.masterVolumeDb, limiter: S.limiter });
     updateAudibility();
     syncGlobalControls();
     if (!selected() && S.tracks.length) S.selectedId = S.tracks[0].id;
     renderAll();
-    if (assigned.some(x => (!x.buffer && x.audioId) || x.sampler.zones.some(z => !z.buffer && z.audioId))) await fetchMissingAudio();
-    const missing = assigned.filter(x => x.kind === 'audio' && !x.buffer).length;
+    const needs = () => S.tracks.some(x => audioClips(x).some(c => !c.buffer && c.audioId) || x.sampler.zones.some(z => !z.buffer && z.audioId));
+    if (needs()) await fetchMissingAudio();
+    const missing = S.tracks.reduce((a, x) => a + audioClips(x).filter(c => !c.buffer).length, 0);
     const missingSamples = assigned.reduce((a, x) => a + x.sampler.zones.filter(z => !z.buffer).length, 0);
     toast((missing ? t('settingsLoadedMissing', { n: missing }) : t('settingsLoaded')) + (missingSamples ? ' ' + t('samplesMissing', { n: missingSamples }) : ''), 6000);
   }
@@ -903,47 +1127,60 @@
     $('#projectName').textContent = S.projectName ? '· ' + S.projectName : '';
   }
 
-  // Download audio from the server for tracks that reference it but have none loaded.
+  // Download audio from the server for clips (and sampler zones) that reference it but have none loaded.
   async function fetchMissingAudio() {
     if (!S.server) return;
-    const todo = S.tracks.filter(x => !x.buffer && x.audioId);
-    for (let i = 0; i < todo.length; i++) {
-      const tr = todo[i];
-      toast(t('downloadingAudio', { i: i + 1, n: todo.length }), 60000);
+    const byId = new Map();
+    for (const x of S.tracks) {
+      for (const c of audioClips(x)) {
+        if (c.buffer || !c.audioId) continue;
+        if (!byId.has(c.audioId)) byId.set(c.audioId, []);
+        byId.get(c.audioId).push(c);
+      }
+    }
+    let i = 0;
+    for (const [id, clips] of byId) {
+      toast(t('downloadingAudio', { i: ++i, n: byId.size }), 60000);
       try {
-        const buf = await S.ctx.decodeAudioData(await API.fetchAudio(tr.audioId));
-        setTrackBuffer(tr, buf);
+        const buf = await S.ctx.decodeAudioData(await API.fetchAudio(id));
+        for (const c of clips) setClipBuffer(c, buf, false);
       } catch (e) {
         console.error(e);
-        tr.audioId = null;
+        for (const c of clips) c.audioId = null;
       }
     }
     const zones = S.tracks.flatMap(x => x.sampler.zones.filter(z => !z.buffer && z.audioId));
-    for (let i = 0; i < zones.length; i++) {
-      toast(t('downloadingSamples', { i: i + 1, n: zones.length }), 60000);
+    for (let k = 0; k < zones.length; k++) {
+      toast(t('downloadingSamples', { i: k + 1, n: zones.length }), 60000);
       try {
-        setZoneBuffer(zones[i], await S.ctx.decodeAudioData(await API.fetchAudio(zones[i].audioId)));
+        setZoneBuffer(zones[k], await S.ctx.decodeAudioData(await API.fetchAudio(zones[k].audioId)));
       } catch (e) {
         console.error(e);
-        zones[i].audioId = null;
+        zones[k].audioId = null;
       }
     }
-    if (todo.length || zones.length) renderAll();
+    if (byId.size || zones.length) renderAll();
   }
 
-  // Upload a track's original audio to the server (once) and return its audio id.
-  async function ensureUploaded(tr) {
-    if (tr.audioId) return tr.audioId; // may already be set through a track sharing the same source
-    let blob = tr.source;
-    let fileName = tr.fileName || safeName(tr.name) + '.wav';
+  // Upload a clip's audio to the server (once) and return its audio id.
+  async function ensureUploaded(c) {
+    if (c.audioId) return c.audioId; // may already be set through a clip sharing the same audio
+    let blob = c.source;
+    let fileName = c.fileName || 'audio.wav';
     if (!blob) {
-      // No original file available: upload the decoded audio as WAV (un-reversed, like an original).
-      blob = DSP.encodeWav(tr.reversed ? DSP.reversed(S.ctx, tr.buffer) : tr.buffer);
-      fileName = safeName(tr.name) + '.wav';
+      // No original file (recorded or edited audio): upload the decoded audio as WAV, un-reversed like an original.
+      blob = DSP.encodeWav(c.reversed ? DSP.reversed(S.ctx, c.buffer) : c.buffer);
+      fileName = safeName((c.fileName || 'audio').replace(/\.[^.]+$/, '')) + '.wav';
     }
     if (blob.size > S.server.maxUploadMb * 1024 * 1024) throw new Error(t('fileTooLarge', { name: fileName, mb: S.server.maxUploadMb }));
     const res = await API.uploadAudio(blob, fileName);
-    for (const x of S.tracks) if (x === tr || (!x.audioId && x.source && x.source === tr.source)) x.audioId = res.id;
+    // Clips cut from the same file or the same edited audio share the upload.
+    for (const x of S.tracks) {
+      for (const k of audioClips(x)) {
+        if (k.audioId) continue;
+        if (k === c || (c.source && k.source === c.source) || (!c.source && !k.source && k.buffer === c.buffer)) k.audioId = res.id;
+      }
+    }
     return res.id;
   }
 
@@ -955,8 +1192,9 @@
     const btn = $('#btnServerSave');
     btn.disabled = true;
     try {
-      const pending = S.tracks.filter(x => x.buffer && !x.audioId);
+      const pending = S.tracks.flatMap(x => audioClips(x).filter(c => c.buffer && !c.audioId));
       for (let i = 0; i < pending.length; i++) {
+        if (pending[i].audioId) continue;
         toast(t('uploadingAudio', { i: i + 1, n: pending.length }), 60000);
         await ensureUploaded(pending[i]);
       }
@@ -985,9 +1223,12 @@
     pause();
     for (const tr of S.tracks) tr.channel.disconnect();
     S.tracks = [];
+    S.patterns = [];
     S.selectedId = null;
     S.pos = 0;
     S.sel = null;
+    S.selClips = new Set();
+    S.focus = null;
     S.undo = [];
     S.redo = [];
     updateEditButtons();
@@ -1037,7 +1278,7 @@
             S.projectId = null;
             S.projectName = '';
             updateProjectTitle();
-            for (const tr of S.tracks) tr.audioId = null; // the server may have removed the audio too
+            for (const x of S.tracks) for (const c of audioClips(x)) c.audioId = null; // the server may have removed the audio too
           }
           openProjectsDialog();
         } catch (e) { toast(t('serverError', { msg: e.message }), 6000); }
@@ -1085,31 +1326,40 @@
     try { S.separation = S.server ? await API.separationInfo(refresh) : null; } catch (e) { S.separation = null; }
   }
 
-  // Toolbar button: separate the selected track, or pick a new file first.
+  // Audio clip the separation / clean-up buttons act on: the selected clip, or the selected track's only clip.
+  function targetClip() {
+    if (S.focus && !isPat(S.focus) && S.focus.buffer && trackOf(S.focus)) return S.focus;
+    const tr = selected();
+    const list = tr ? audioClips(tr).filter(c => c.buffer) : [];
+    return list.length === 1 ? list[0] : null;
+  }
+
+  // Toolbar button: separate the selected clip, or pick a new file first.
   async function separateButton() {
     if (!S.server) { toast(t('serverOfflineTip'), 6000); return; }
     if (S.sepJob) { openSeparationDialog(null); return; }
-    const tr = selected();
-    if (tr && tr.buffer) { openSeparationDialog(tr); return; }
+    const c = targetClip();
+    if (c) { openSeparationDialog(c); return; }
     const [f] = await pickFiles($('#fileOne'));
     if (!f) return;
     await addAudioFiles([f]);
-    const added = selected();
-    if (added && added.buffer) openSeparationDialog(added);
+    const added = targetClip();
+    if (added) openSeparationDialog(added);
   }
 
   /* ---------- Recording clean-up: breaths, throat clearing, coughs ---------- */
   const CLEAN_COLORS = { breath: '#4fc3f7', noise: '#ff8a65' };
   let cleanSrc = null;
 
-  const cleanTrack = () => (S.clean ? S.tracks.find(x => x.id === S.clean.trackId) || null : null);
+  // The audio clip being cleaned (named `tr` below for history; it is a clip).
+  const cleanTrack = () => (S.clean ? findClip(S.clean.clipId) : null);
   const cleanGain = r => (r.kind === 'breath' ? S.cleanOpts.breathDb : S.cleanOpts.noiseDb);
   const fmtCleanDb = v => (v <= -60 ? t('cleanMute') : v.toFixed(0) + ' dB');
 
   function openCleanupDialog(tr) {
     if (!tr || !tr.buffer) return;
     stopCleanPreview();
-    const job = { trackId: tr.id, baked: bakeClip(tr), feats: null, regions: [], progress: 0 };
+    const job = { clipId: tr.id, baked: bakeClip(tr), feats: null, regions: [], progress: 0 };
     S.clean = job;
     renderCleanupDialog();
     const dlg = $('#cleanDlg');
@@ -1164,7 +1414,7 @@
 
   function addSelectionToCleanup() {
     const tr = cleanTrack();
-    if (!tr || !S.sel || S.sel.kind !== 'audio' || S.sel.trackId !== tr.id) return;
+    if (!tr || !S.sel || !trackOf(tr) || !S.sel.ids.includes(trackOf(tr).id)) return;
     const len = S.clean.baked.duration;
     const t0 = clamp(S.sel.t0 - tr.offset, 0, len), t1 = clamp(S.sel.t1 - tr.offset, 0, len);
     if (t1 - t0 < 0.01) return;
@@ -1177,11 +1427,11 @@
     const c = S.clean, tr = cleanTrack();
     const on = c ? c.regions.filter(r => r.on) : [];
     if (!tr || !tr.buffer || !on.length) return;
-    pushUndo(t('cleanUndo'), [tr]);
+    pushUndo(t('cleanUndo'));
     const out = Cleanup.apply(S.ctx, c.baked, on.map(r => ({ t0: r.t0, t1: r.t1, gainDb: cleanGain(r) })));
     setEditedBuffer(tr, out, tr.offset);
     $('#cleanDlg').close();
-    afterAudioEdit();
+    afterEdit();
     toast(t('cleanApplied', { n: on.length }));
   }
 
@@ -1284,7 +1534,7 @@
       slider(t('cleanBreathDb'), -60, 0, () => o.breathDb, v => { o.breathDb = v; }, fmtCleanDb),
       slider(t('cleanNoiseDb'), -60, 0, () => o.noiseDb, v => { o.noiseDb = v; }, fmtCleanDb));
 
-    const hasSel = !!(S.sel && S.sel.kind === 'audio' && S.sel.trackId === tr.id);
+    const hasSel = !!(S.sel && trackOf(tr) && S.sel.ids.includes(trackOf(tr).id) && S.sel.t1 > tr.offset && S.sel.t0 < clipEnd(tr));
     const setAll = on => { for (const r of c.regions) r.on = on; renderList(); };
     body.append(
       controls,
@@ -1350,7 +1600,7 @@
       return;
     }
 
-    const tr = S.sepTarget && S.tracks.includes(S.sepTarget) ? S.sepTarget : null;
+    const tr = S.sepTarget && trackOf(S.sepTarget) ? S.sepTarget : null; // the audio clip to separate
     if (!tr || !tr.buffer) {
       body.append(h('p', { text: t('sepNeedTrack') }));
       return;
@@ -1386,7 +1636,7 @@
     const device = info.device === 'cuda' && info.gpu ? `GPU (${info.gpu})` : info.device;
 
     body.append(
-      h('p', {}, t('sepSource'), ' ', h('strong', { text: tr.name }), h('span', { class: 'hint', text: ` · ${tr.buffer.duration.toFixed(1)} s` })),
+      h('p', {}, t('sepSource'), ' ', h('strong', { text: trackOf(tr).name + (tr.fileName ? ` · ${tr.fileName}` : '') }), h('span', { class: 'hint', text: ` · ${tr.buffer.duration.toFixed(1)} s` })),
       h('div', { class: 'sep-form' },
         h('label', {}, h('span', { class: 'lbl', text: t('sepModel') }), modelSel),
         h('label', {}, h('span', { class: 'lbl', text: t('sepQuality') }), shiftsSel)),
@@ -1424,7 +1674,7 @@
     const all = S.separation.models[o.model].stems;
     const stems = (o.stems || all).filter(s => all.includes(s));
     if (!stems.length) { toast(t('sepNoStems')); return; }
-    S.sepJob = { trackId: tr.id, trackName: tr.name, opts: clone(o), stems, job: { status: 'uploading', progress: 0 } };
+    S.sepJob = { clipId: tr.id, trackName: trackOf(tr).name, opts: clone(o), stems, job: { status: 'uploading', progress: 0 } };
     renderSeparationDialog();
     try {
       const audioId = await ensureUploaded(tr);
@@ -1476,24 +1726,27 @@
     renderSeparationDialog();
   }
 
-  // Add the separated stems as new tracks aligned with the source track.
+  // Add the separated stems as new tracks, each with a clip aligned with the source clip.
   async function importStems(sj) {
-    const src = S.tracks.find(x => x.id === sj.trackId) || null;
+    const src = findClip(sj.clipId);
+    const srcTrack = src && trackOf(src);
     const stems = sj.job.stems;
     const created = [];
     for (let i = 0; i < stems.length; i++) {
       const stem = stems[i];
       toast(t('downloadingAudio', { i: i + 1, n: stems.length }), 60000);
       const buf = await S.ctx.decodeAudioData(await API.fetchAudio(stem.audioId));
-      const at = src ? S.tracks.indexOf(src) + 1 + i : S.tracks.length;
+      const at = srcTrack ? S.tracks.indexOf(srcTrack) + 1 + i : S.tracks.length;
       const nt = createTrack(`${sj.trackName} – ${t('stem_' + stem.name)}`, STEM_ROLES[stem.name] || 'other', at);
+      const c = newAudioClip(null, { fileName: `${safeName(sj.trackName)} - ${stem.name}.flac`, audioId: stem.audioId });
       if (src) {
         // Same edits as the source clip; stems have the same length as the source audio.
-        for (const k of CLIP_KEYS) nt[k] = clone(src[k]);
-        nt.keepClip = true;
+        for (const k of ['offset', 'trimStart', 'trimEnd', 'fadeIn', 'fadeOut', 'clipGainDb', 'reversed']) c[k] = src[k];
+        setClipBuffer(c, buf, false);
+      } else {
+        setClipBuffer(c, buf, true);
       }
-      setTrackBuffer(nt, buf, `${safeName(sj.trackName)} - ${stem.name}.flac`);
-      nt.audioId = stem.audioId;
+      nt.clips.push(c);
       created.push(nt);
     }
     if (sj.opts.autoMix) {
@@ -1502,7 +1755,7 @@
         applyChannel(nt);
       }
     }
-    if (src && sj.opts.muteOriginal) src.mute = true;
+    if (srcTrack && sj.opts.muteOriginal) srcTrack.mute = true;
     updateAudibility();
     if (created.length) S.selectedId = created[0].id;
     renderAll();
@@ -1512,12 +1765,12 @@
 
   /* ---------- Export ---------- */
   async function exportMix() {
-    const tracks = S.tracks.filter(x => x.buffer || (x.kind === 'notes' && x.notes.length));
+    const tracks = S.tracks.filter(x => x.clips.some(c => (isPat(c) ? x.kind === 'notes' : c.buffer)));
     if (!tracks.length) { toast(t('noTracksToExport')); return; }
-    const sr = S.ctx.sampleRate;
+    const sr = S.ctx.sampleRate, spb = beatSec();
     let end = 0, tail = 1;
     for (const tr of tracks) {
-      end = Math.max(end, tr.buffer ? clipEnd(tr) : notesEnd(tr));
+      for (const c of tr.clips) end = Math.max(end, clipEnd(c));
       if (tr.reverb.enabled) tail = Math.max(tail, tr.reverb.decay + tr.reverb.preDelay / 1000);
       if (tr.delay.enabled && tr.delay.feedback > 0) {
         const ds = DSP.delaySeconds(tr.delay, S.bpm);
@@ -1533,8 +1786,11 @@
       const ch = new DSP.Channel(off, master.input);
       ch.apply(tr, S.bpm);
       ch.setAudible(!tr.mute && (!anySolo || tr.solo));
-      if (tr.buffer) DSP.scheduleClip(off, tr, ch.input, 0, 0);
-      else for (const n of tr.notes) Synth.play(off, ch.input, tr.instrument, n.p, n.v, n.t * beatSec(), n.d * beatSec(), tr.sampler);
+      for (const c of tr.clips) {
+        if (!isPat(c)) { if (c.buffer) DSP.scheduleClip(off, c, ch.input, 0, 0); continue; }
+        if (tr.kind !== 'notes') continue;
+        for (const n of clipNotes(c, c.start, c.start + c.len, false)) Synth.play(off, ch.input, tr.instrument, n.p, n.v, n.t * spb, n.d * spb, tr.sampler);
+      }
     }
     const btn = $('#btnExport');
     btn.disabled = true;
@@ -1651,9 +1907,9 @@
     if (Math.abs(need - have) > 2) renderTimeline();
   }, 300);
 
-  function afterClip(tr) {
-    clampClip(tr);
-    if (tr.ui && tr.ui.clip) layoutClip(tr);
+  function afterClip(c) {
+    clampClip(c);
+    layoutClip(c);
     refreshCtrls();
     restartSoon();
     checkTimelineSize();
@@ -1664,11 +1920,11 @@
     return Math.max(60, projectEnd() + 20, S.pos + 10);
   }
 
-  function selectTrack(id) {
+  function selectTrack(id, quiet) {
     if (S.selectedId === id) return;
     S.selectedId = id;
     document.querySelectorAll('.row.track').forEach(r => r.classList.toggle('selected', +r.dataset.id === id));
-    renderInspector();
+    if (!quiet) renderInspector();
   }
 
   function renderAll() {
@@ -1680,6 +1936,7 @@
     const inner = $('#tlInner');
     inner.innerHTML = '';
     S.trackCtrls = [];
+    S.clipUi = new Map();
     const len = timelineLength();
     const laneW = Math.ceil(len * S.pps);
     inner.dataset.laneW = laneW;
@@ -1705,6 +1962,12 @@
       const tt = i * step;
       const label = tt >= 60 ? `${Math.floor(tt / 60)}:${pad2(Math.floor(tt % 60))}` : step < 1 ? tt.toFixed(step < 0.5 ? 2 : 1) : tt + 's';
       lane.append(h('div', { class: 'tick', style: `left:${tt * S.pps}px` }, h('span', { text: label })));
+    }
+    // Bar numbers along the bottom edge of the ruler.
+    const barPx = barSec() * S.pps;
+    const every = Math.max(1, Math.ceil(36 / barPx));
+    for (let b = 0; b * barSec() <= len; b += every) {
+      lane.append(h('div', { class: 'bar-tick', style: `left:${b * barPx}px` }, String(b + 1)));
     }
     // Click or drag on the ruler to move the playhead.
     lane.addEventListener('pointerdown', e => {
@@ -1742,29 +2005,18 @@
     const row = h('div', { class: 'row track' + (tr.id === S.selectedId ? ' selected' : '') + (rec ? ' recording' : ''), 'data-id': tr.id });
     const lane = h('div', { class: 'lane' + (tr.kind === 'notes' ? ' notes-lane' : ''), style: laneGridStyle(laneW) });
     tr.ui.lane = lane;
-    lane.addEventListener('pointerdown', e => {
-      if (e.button !== 0 || e.target.closest('button')) return;
-      if (tr.kind === 'notes') { notesLanePointer(tr, lane, e); return; }
-      if (S.tool === 'range') { rangePointer(tr, lane, e); return; }
-      if (e.target !== lane) return;
-      selectTrack(tr.id);
-      setSelection(null);
-      if (!S.recording) seek((e.clientX - lane.getBoundingClientRect().left) / S.pps);
-    });
-    if (tr.kind === 'notes') {
-      lane.addEventListener('dblclick', e => {
-        const bar = Math.floor((e.clientX - lane.getBoundingClientRect().left) / S.pps / barSec());
-        openBarEditor(tr, bar);
-      });
-      buildNotesCells(tr, lane, laneW);
-    } else if (rec) {
+    tr.ui.row = row;
+    lane.addEventListener('pointerdown', e => lanePointer(tr, lane, e));
+    lane.addEventListener('dblclick', e => laneDblClick(tr, lane, e));
+    for (const c of tr.clips) lane.append(buildClip(tr, c));
+    if (rec) {
       lane.append(h('div', { class: 'lane-msg rec-msg', style: `left:${Math.max(0, S.recording.tlStart) * S.pps}px` }, '● ' + t('recLane')));
-    } else if (tr.buffer) {
-      lane.append(buildClip(tr));
-    } else {
-      lane.append(h('div', { class: 'lane-msg' },
-        h('button', { class: 'btn small', onclick: () => loadAudioIntoTrack(tr) }, t('loadAudio')),
-        h('span', { text: t('orRecord') })));
+    } else if (!tr.clips.length) {
+      lane.append(tr.kind === 'notes'
+        ? h('div', { class: 'lane-msg hint-msg', text: t('notesLaneHint') })
+        : h('div', { class: 'lane-msg' },
+          h('button', { class: 'btn small', onclick: () => loadAudioIntoTrack(tr) }, t('loadAudio')),
+          h('span', { text: t('orRecord') })));
     }
     row.append(buildTrackHeader(tr), lane);
     return row;
@@ -1785,8 +2037,8 @@
     C.push({ refresh() { mBtn.classList.toggle('on', tr.mute); sBtn.classList.toggle('on', tr.solo); } });
 
     const fileBtn = tr.kind === 'notes'
-      ? h('button', { class: 'ms', title: t('editBarTip'), onclick: () => openBarEditor(tr, defaultBarFor(tr)) }, '✎')
-      : h('button', { class: 'ms', title: t('loadAudio'), onclick: () => loadAudioIntoTrack(tr) }, '⇪');
+      ? h('button', { class: 'ms', title: t('editPatternTip'), onclick: () => openPatternEditorFor(tr) }, '✎')
+      : h('button', { class: 'ms', title: t('addAudioHere'), onclick: () => loadAudioIntoTrack(tr) }, '⇪');
     const meter = h('div', { class: 'meter mono' }, h('div', { class: 'bar' }));
     tr.ui.meter = meter.firstChild;
 
@@ -1805,30 +2057,57 @@
       vol, pan);
   }
 
-  function buildClip(tr) {
+  /* ---------- Clips on the timeline ---------- */
+  function buildClip(tr, c) {
+    const pat = isPat(c);
     const cv = h('canvas', { class: 'wave' });
-    const hl = h('div', { class: 'handle l', title: t('trimHandle') });
-    const hr = h('div', { class: 'handle r', title: t('trimHandle') });
     const label = h('div', { class: 'clip-label' });
-    const clip = h('div', { class: 'clip', style: `--c:${tr.color}`, title: t('clipTip') }, cv, label, hl, hr);
-    tr.ui.clip = clip;
-    tr.ui.cv = cv;
-    tr.ui.label = label;
-    layoutClip(tr);
-    attachClipDrag(tr, clip, hl, hr);
-    return clip;
+    const cls = 'clip' + (pat ? ' pattern' : '') + (!pat && !c.buffer ? ' missing' : '') + (S.selClips.has(c) ? ' sel' : '');
+    const el = h('div', { class: cls, style: `--c:${tr.color}`, title: t(pat ? 'patternClipTip' : 'clipTip') },
+      cv, label, h('div', { class: 'handle l', title: t('trimHandle') }), h('div', { class: 'handle r', title: t('trimHandle') }));
+    S.clipUi.set(c, { el, cv, label, tr });
+    layoutClip(c);
+    el.addEventListener('pointerdown', e => clipPointer(tr, c, el, e));
+    el.addEventListener('dblclick', e => {
+      if (S.tool === 'range') return;
+      e.stopPropagation();
+      if (pat) openPatternEditor(tr, c);
+      else if (!c.buffer) loadAudioIntoClip(c);
+    });
+    // Right-click deletes a clip, like in FL Studio's playlist.
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      if (S.tool !== 'range' && !S.recording) deleteClips(S.selClips.has(c) ? [...S.selClips] : [c]);
+    });
+    return el;
   }
 
-  function layoutClip(tr) {
-    const { clip, cv, label } = tr.ui;
-    const w = Math.max(2, clipLen(tr) * S.pps);
-    clip.style.left = tr.offset * S.pps + 'px';
-    clip.style.width = w + 'px';
-    label.textContent = tr.name + (tr.clipGainDb ? `  (${fmtDb(tr.clipGainDb)} dB)` : '');
-    drawWave(tr, cv, w, cv.parentElement ? cv.parentElement.clientHeight || 64 : 64);
+  function layoutClip(c) {
+    const u = S.clipUi && S.clipUi.get(c);
+    if (!u) return;
+    const w = Math.max(4, clipLen(c) * S.pps);
+    u.el.style.left = clipStart(c) * S.pps + 'px';
+    u.el.style.width = w + 'px';
+    const hgt = u.el.clientHeight || 100;
+    if (isPat(c)) {
+      const p = getPattern(c.pattern);
+      u.label.textContent = p ? p.name : '?';
+      drawPatternClip(u.tr, c, u.cv, w, hgt);
+    } else {
+      u.label.textContent = c.buffer
+        ? (c.fileName ? c.fileName.replace(/\.[^.]+$/, '') : u.tr.name) + (c.clipGainDb ? `  (${fmtDb(c.clipGainDb)} dB)` : '')
+        : '⚠ ' + t('clipMissing', { name: c.fileName || '?' });
+      drawWave(c, u.cv, w, hgt, u.tr.color);
+    }
   }
 
-  function drawWave(tr, cv, w, hgt) {
+  // Redraw every clip of a pattern (after its notes, length or name changed).
+  function redrawPatternClips(pid) {
+    if (!S.clipUi) return;
+    for (const c of S.clipUi.keys()) if (isPat(c) && c.pattern === pid) layoutClip(c);
+  }
+
+  function canvasSize(cv, w, hgt) {
     const dpr = window.devicePixelRatio || 1;
     const W = Math.max(1, Math.min(16000, Math.ceil(w * dpr)));
     const H = Math.max(1, Math.ceil(hgt * dpr));
@@ -1836,22 +2115,27 @@
     cv.height = H;
     const g = cv.getContext('2d');
     g.clearRect(0, 0, W, H);
-    if (!tr.peaks) return;
-    const p = tr.peaks, sr = tr.buffer.sampleRate, nb = p.length / 2;
-    const len = clipLen(tr), spp = len / W;
-    const amp = Math.min(4, dbToGain(tr.clipGainDb));
+    return { g, W, H, dpr };
+  }
+
+  function drawWave(c, cv, w, hgt, color) {
+    const { g, W, H, dpr } = canvasSize(cv, w, hgt);
+    if (!c.peaks) return;
+    const p = c.peaks, sr = c.buffer.sampleRate, nb = p.length / 2;
+    const len = clipLen(c), spp = len / W;
+    const amp = Math.min(4, dbToGain(c.clipGainDb));
     const mid = H / 2;
     const env = x => {
       const r = x * spp;
       let f = 1;
-      if (tr.fadeIn > 0 && r < tr.fadeIn) f = r / tr.fadeIn;
-      if (tr.fadeOut > 0 && len - r < tr.fadeOut) f = Math.min(f, (len - r) / tr.fadeOut);
+      if (c.fadeIn > 0 && r < c.fadeIn) f = r / c.fadeIn;
+      if (c.fadeOut > 0 && len - r < c.fadeOut) f = Math.min(f, (len - r) / c.fadeOut);
       return f;
     };
-    g.fillStyle = tr.color;
+    g.fillStyle = color;
     g.globalAlpha = 0.9;
     for (let x = 0; x < W; x++) {
-      const t0 = tr.trimStart + x * spp;
+      const t0 = c.trimStart + x * spp;
       const i0 = Math.floor((t0 * sr) / PEAK_BLOCK);
       const i1 = Math.max(i0 + 1, Math.floor(((t0 + spp) * sr) / PEAK_BLOCK));
       let mn = 0, mx = 0;
@@ -1869,57 +2153,302 @@
     g.strokeStyle = 'rgba(255,255,255,.75)';
     g.lineWidth = 1.5 * dpr;
     g.beginPath();
-    if (tr.fadeIn > 0) { g.moveTo(0, H); g.lineTo(tr.fadeIn / spp, 0); }
-    if (tr.fadeOut > 0) { g.moveTo(W - tr.fadeOut / spp, 0); g.lineTo(W, H); }
+    if (c.fadeIn > 0) { g.moveTo(0, H); g.lineTo(c.fadeIn / spp, 0); }
+    if (c.fadeOut > 0) { g.moveTo(W - c.fadeOut / spp, 0); g.lineTo(W, H); }
     g.stroke();
   }
 
-  function attachClipDrag(tr, clip, hl, hr) {
-    clip.addEventListener('pointerdown', e => {
-      if (e.button !== 0 || S.tool === 'range') return; // the lane handles range selection
-      e.stopPropagation();
-      e.preventDefault();
-      selectTrack(tr.id);
-      const mode = e.target === hl ? 'l' : e.target === hr ? 'r' : 'move';
-      const x0 = e.clientX;
-      const o = { offset: tr.offset, ts: tr.trimStart, te: tr.trimEnd };
-      const beat = 60 / S.bpm;
-      const snap = (v, ev) => (S.snap && !ev.altKey ? Math.round(v / beat) * beat : v);
-      clip.setPointerCapture(e.pointerId);
-      clip.classList.add('dragging');
-      let moved = false;
-      const move = ev => {
-        const dt = (ev.clientX - x0) / S.pps;
-        if (!moved) {
-          if (Math.abs(ev.clientX - x0) <= 2) return;
-          moved = true;
-          pushUndo(t(mode === 'move' ? 'undoMoveClip' : 'undoTrimClip'), [tr]);
-        }
-        if (mode === 'move') {
-          tr.offset = Math.max(0, snap(o.offset + dt, ev));
-        } else if (mode === 'l') {
-          const newOffset = clamp(snap(o.offset + dt, ev), o.offset - o.ts, o.offset + (o.te - o.ts) - MIN_CLIP);
-          tr.trimStart = o.ts + (newOffset - o.offset);
-          tr.offset = newOffset;
-        } else {
-          const endTl = snap(o.offset + (o.te - o.ts) + dt, ev);
-          tr.trimEnd = clamp(o.ts + (endTl - o.offset), o.ts + MIN_CLIP, tr.buffer.duration);
-        }
-        clampClip(tr);
-        layoutClip(tr);
-        refreshCtrls();
-      };
-      const up = () => {
-        clip.removeEventListener('pointermove', move);
-        clip.removeEventListener('pointerup', up);
-        clip.removeEventListener('pointercancel', up);
-        clip.classList.remove('dragging');
-        if (moved) { restartSoon(); checkTimelineSize(); }
-      };
-      clip.addEventListener('pointermove', move);
-      clip.addEventListener('pointerup', up);
-      clip.addEventListener('pointercancel', up);
+  // Mini piano roll of a pattern clip, with dashed lines where the pattern loops.
+  function drawPatternClip(tr, c, cv, w, hgt) {
+    const { g, W, H, dpr } = canvasSize(cv, w, hgt);
+    const p = getPattern(c.pattern);
+    if (!p) return;
+    const top = 16 * dpr, area = H - top - 3 * dpr;
+    const xOf = b => ((b - c.start) / c.len) * W;
+    if (c.len > p.len - c.from + NOTE_EPS) {
+      g.strokeStyle = 'rgba(255,255,255,.35)';
+      g.setLineDash([3 * dpr, 3 * dpr]);
+      g.beginPath();
+      for (let b = c.start - c.from + p.len; b < c.start + c.len - NOTE_EPS; b += p.len) {
+        if (b <= c.start + NOTE_EPS) continue;
+        const x = Math.round(xOf(b)) + 0.5;
+        g.moveTo(x, 0);
+        g.lineTo(x, H);
+      }
+      g.stroke();
+      g.setLineDash([]);
+    }
+    const notes = clipNotes(c, c.start, c.start + c.len, false);
+    if (!notes.length) return;
+    const drums = Synth.isDrum(tr.instrument);
+    let lo = 48, hi = 72;
+    if (!drums) {
+      lo = Math.min(...p.notes.map(n => n.p)) - 1;
+      hi = Math.max(...p.notes.map(n => n.p)) + 1;
+      if (hi - lo < 12) { const m = (hi + lo) / 2; lo = Math.floor(m - 6); hi = Math.ceil(m + 6); }
+    }
+    const rows = drums ? Synth.DRUM_KIT.length : hi - lo + 1;
+    const rh = area / rows;
+    g.fillStyle = '#fff';
+    for (const n of notes) {
+      const r = drums ? Synth.DRUM_KIT.findIndex(k => k.p === n.p) : hi - n.p;
+      if (r < 0) continue;
+      const x = xOf(n.t);
+      const nw = drums ? Math.max(2 * dpr, (0.2 / c.len) * W) : Math.max(2 * dpr, (n.d / c.len) * W - 1);
+      g.globalAlpha = 0.45 + (n.v / 127) * 0.5;
+      g.fillRect(x, top + r * rh, nw, Math.max(1.5 * dpr, rh - 1));
+    }
+    g.globalAlpha = 1;
+  }
+
+  /* ---------- Timeline pointer interaction ---------- */
+  const laneTime = (lane, ev) => Math.max(0, (ev.clientX - lane.getBoundingClientRect().left) / S.pps);
+  const snapSec = (v, ev) => (S.snap && !(ev && ev.altKey) ? Math.round(v / beatSec()) * beatSec() : v);
+  const snapBeat = (v, ev) => (S.snap && !(ev && ev.altKey) ? Math.round(v) : v);
+
+  // Index of the track row under a client y position (clamped to the first / last row).
+  function rowAt(y) {
+    const rows = S.tracks.map(x => x.ui.lane.getBoundingClientRect());
+    for (let i = 0; i < rows.length; i++) if (y < rows[i].bottom) return i;
+    return rows.length - 1;
+  }
+
+  function lanePointer(tr, lane, e) {
+    if (e.button !== 0 || e.target.closest('button')) return;
+    if (S.tool === 'range') { rangePointer(tr, lane, e); return; }
+    if (e.target.closest('.clip')) return;
+    e.preventDefault();
+    selectTrack(tr.id);
+    boxSelect(lane, e);
+  }
+
+  // Drag on empty space: select the clips inside the box. A plain click deselects and moves the playhead.
+  function boxSelect(lane, e) {
+    const inner = $('#tlInner');
+    const x0 = e.clientX, y0 = e.clientY;
+    const base = e.shiftKey ? new Set(S.selClips) : new Set();
+    let box = null;
+    lane.setPointerCapture(e.pointerId);
+    const move = ev => {
+      if (!box && Math.abs(ev.clientX - x0) <= 3 && Math.abs(ev.clientY - y0) <= 3) return;
+      if (!box) { box = h('div', { class: 'box-select' }); inner.append(box); }
+      const r = inner.getBoundingClientRect();
+      const L = Math.min(x0, ev.clientX), T = Math.min(y0, ev.clientY), R = Math.max(x0, ev.clientX), B = Math.max(y0, ev.clientY);
+      Object.assign(box.style, { left: L - r.left + 'px', top: T - r.top + 'px', width: R - L + 'px', height: B - T + 'px' });
+      S.selClips = new Set(base);
+      for (const [c, u] of S.clipUi) {
+        const q = u.el.getBoundingClientRect();
+        if (q.right > L && q.left < R && q.bottom > T && q.top < B) S.selClips.add(c);
+      }
+      refreshClipSelection();
+    };
+    const up = ev => {
+      lane.removeEventListener('pointermove', move);
+      lane.removeEventListener('pointerup', up);
+      lane.removeEventListener('pointercancel', up);
+      if (box) {
+        box.remove();
+        S.focus = [...S.selClips].pop() || null;
+        setRange(null);
+        renderInspector();
+      } else {
+        if (!e.shiftKey) selectClips([]);
+        setRange(null);
+        if (!S.recording) seek(laneTime(lane, ev));
+      }
+    };
+    lane.addEventListener('pointermove', move);
+    lane.addEventListener('pointerup', up);
+    lane.addEventListener('pointercancel', up);
+  }
+
+  // Double-click on empty space of an instrument track: new pattern at that bar.
+  function laneDblClick(tr, lane, e) {
+    if (e.target.closest('.clip') || e.target.closest('button') || S.tool === 'range') return;
+    if (tr.kind !== 'notes') return;
+    newPatternAt(tr, laneTime(lane, e));
+  }
+
+  function clipPointer(tr, c, el, e) {
+    if (e.button !== 0 || S.tool === 'range') return; // the range tool is handled by the lane
+    e.stopPropagation();
+    e.preventDefault();
+    if (S.recording) return;
+    selectTrack(tr.id, true);
+    if (S.tool === 'slice') {
+      const ts = snapSec(laneTime(tr.ui.lane, e), e);
+      if (ts > clipStart(c) + 1e-3 && ts < clipEnd(c) - 1e-3) {
+        pushUndo(t('split'));
+        splitClip(c, ts);
+        afterEdit();
+      }
+      return;
+    }
+    // Shift+click adds or removes a clip; a plain click on an unselected clip selects only it.
+    if (e.shiftKey) {
+      if (S.selClips.has(c)) S.selClips.delete(c); else S.selClips.add(c);
+      S.focus = S.selClips.has(c) ? c : [...S.selClips].pop() || null;
+      setRange(null);
+      refreshClipSelection();
+      renderInspector();
+      if (!S.selClips.has(c)) return;
+    } else if (!S.selClips.has(c)) {
+      setRange(null);
+      selectClips([c]);
+    } else if (S.focus !== c) {
+      S.focus = c;
+      renderInspector();
+    }
+    const h0 = e.target.classList;
+    const mode = h0.contains('handle') ? (h0.contains('l') ? 'l' : 'r') : 'move';
+    if (mode === 'move') dragClips(c, el, e);
+    else trimClip(c, el, e, mode);
+  }
+
+  // Move the selected clips in time and across tracks. Ctrl+drag leaves copies at the old place.
+  function dragClips(anchor, el, e) {
+    const moving = [...S.selClips];
+    const dup = e.ctrlKey || e.metaKey;
+    const set = new Set(moving);
+    const fromRow = new Map(moving.map(c => [c, S.tracks.indexOf(trackOf(c))]));
+    const orig = new Map(moving.map(c => [c, { start: c.start, offset: c.offset }]));
+    const minStart = Math.min(...moving.map(clipStart));
+    const anchorStart = clipStart(anchor), anchorRow = fromRow.get(anchor);
+    const laneTops = S.tracks.map(x => x.ui.lane.getBoundingClientRect().top);
+    let started = false, rowDelta = 0;
+    el.setPointerCapture(e.pointerId);
+
+    const validRows = d => moving.every(c => {
+      const tr = S.tracks[fromRow.get(c) + d];
+      return tr && (d === 0 || canHold(tr, clipKind(c), dup ? null : set));
     });
+    const move = ev => {
+      if (!started) {
+        if (Math.abs(ev.clientX - e.clientX) <= 3 && Math.abs(ev.clientY - e.clientY) <= 3) return;
+        started = true;
+        pushUndo(t(dup ? 'undoDuplicateClip' : 'undoMoveClip'));
+        for (const c of moving) S.clipUi.get(c).el.classList.add('dragging');
+      }
+      let dt = snapSec(anchorStart + (ev.clientX - e.clientX) / S.pps, ev) - anchorStart;
+      dt = Math.max(dt, -minStart);
+      const d = rowAt(ev.clientY) - anchorRow;
+      if (validRows(d)) rowDelta = d;
+      for (const c of moving) {
+        const o = orig.get(c);
+        if (isPat(c)) c.start = Math.max(0, o.start + dt / beatSec());
+        else c.offset = Math.max(0, o.offset + dt);
+        layoutClip(c);
+        const from = fromRow.get(c);
+        S.clipUi.get(c).el.style.transform = rowDelta ? `translateY(${laneTops[from + rowDelta] - laneTops[from]}px)` : '';
+      }
+      refreshCtrls();
+    };
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      if (!started) return;
+      for (const c of moving) {
+        const src = S.tracks[fromRow.get(c)];
+        if (dup) {
+          // The copy stays where the clip was.
+          const k = copyClip(c);
+          Object.assign(k, isPat(c) ? { start: orig.get(c).start } : { offset: orig.get(c).offset });
+          src.clips.push(k);
+        }
+        if (rowDelta) {
+          const dst = S.tracks[fromRow.get(c) + rowDelta];
+          src.clips.splice(src.clips.indexOf(c), 1);
+          adoptKind(dst, clipKind(c), src);
+          dst.clips.push(c);
+        }
+      }
+      if (rowDelta) S.selectedId = trackOf(anchor).id;
+      afterEdit();
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  }
+
+  // Drag a clip edge. Pattern clips can be made longer than their pattern: the pattern then loops.
+  function trimClip(c, el, e, mode) {
+    const o = Object.assign({}, c);
+    let started = false;
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('dragging');
+    const move = ev => {
+      const dx = (ev.clientX - e.clientX) / S.pps;
+      if (!started) {
+        if (Math.abs(ev.clientX - e.clientX) <= 2) return;
+        started = true;
+        pushUndo(t('undoTrimClip'));
+      }
+      if (isPat(c)) {
+        const db = dx / beatSec();
+        if (mode === 'r') {
+          c.len = Math.max(MIN_PAT, snapBeat(o.start + o.len + db, ev) - o.start);
+        } else {
+          const ns = clamp(snapBeat(o.start + db, ev), o.start - o.from, o.start + o.len - MIN_PAT);
+          c.start = ns;
+          c.from = o.from + (ns - o.start);
+          c.len = o.len - (ns - o.start);
+        }
+      } else if (mode === 'l') {
+        const ns = clamp(snapSec(o.offset + dx, ev), o.offset - o.trimStart, o.offset + (o.trimEnd - o.trimStart) - MIN_CLIP);
+        c.trimStart = o.trimStart + (ns - o.offset);
+        c.offset = ns;
+      } else if (c.buffer) {
+        const endTl = snapSec(o.offset + (o.trimEnd - o.trimStart) + dx, ev);
+        c.trimEnd = clamp(o.trimStart + (endTl - o.offset), o.trimStart + MIN_CLIP, c.buffer.duration);
+      }
+      clampClip(c);
+      layoutClip(c);
+      refreshCtrls();
+    };
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      el.classList.remove('dragging');
+      if (started) { restartSoon(); checkTimelineSize(); }
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  }
+
+  // Range tool: drag to select a time range, across several tracks when dragging up or down.
+  function rangePointer(tr, lane, e) {
+    e.preventDefault();
+    selectTrack(tr.id);
+    const t0 = snapSec(laneTime(lane, e), e);
+    const r0 = S.tracks.indexOf(tr);
+    let moved = false;
+    lane.setPointerCapture(e.pointerId);
+    const move = ev => {
+      if (!moved && Math.abs(ev.clientX - e.clientX) <= 3 && Math.abs(ev.clientY - e.clientY) <= 3) return;
+      moved = true;
+      const t1 = snapSec(laneTime(lane, ev), ev);
+      const r1 = rowAt(ev.clientY);
+      const ids = S.tracks.slice(Math.min(r0, r1), Math.max(r0, r1) + 1).map(x => x.id);
+      setRange({ t0: Math.min(t0, t1), t1: Math.max(t0, t1), ids });
+    };
+    const up = () => {
+      lane.removeEventListener('pointermove', move);
+      lane.removeEventListener('pointerup', up);
+      lane.removeEventListener('pointercancel', up);
+      if (!moved) {
+        setRange(null);
+        selectClips([]);
+        if (!S.recording) seek(t0);
+      } else if (S.selClips.size) {
+        selectClips([]);
+      }
+    };
+    lane.addEventListener('pointermove', move);
+    lane.addEventListener('pointerup', up);
+    lane.addEventListener('pointercancel', up);
   }
 
   function positionPlayhead(pos) {
@@ -1972,7 +2501,7 @@
     const nameIn = h('input', { type: 'text', class: 'text-in', maxlength: 80, 'aria-label': t('name') });
     nameIn.addEventListener('input', () => {
       tr.name = nameIn.value || t('trackN', { n: tr.id });
-      if (tr.ui.label) layoutClip(tr);
+      for (const c of tr.clips) layoutClip(c);
       for (const c of S.trackCtrls) c.refresh();
       C.forEach(c => c !== nameCtrl && c.refresh());
     });
@@ -1988,39 +2517,52 @@
       h('label', {}, h('span', { class: 'lbl', text: t('role') }), roleSel));
     if (tr.kind === 'notes') return cardNotesTrack(tr, top);
 
-    const info = tr.buffer
-      ? `${tr.fileName || ''} · ${tr.buffer.duration.toFixed(2)} s · ${tr.buffer.numberOfChannels === 1 ? t('mono') : t('stereo')} · ${tr.buffer.sampleRate} Hz`
-      : t('noAudio');
-
-    const actions = h('div', { class: 'btn-row' },
-      h('button', { class: 'btn small', onclick: () => loadAudioIntoTrack(tr) }, tr.buffer ? t('replaceAudio') : t('loadAudio')),
-      h('button', { class: 'btn small', onclick: () => { S.selectedId = tr.id; toggleRecord(); }, disabled: !!tr.buffer || !!S.recording, title: t('recordHereTip') }, '● ' + t('recordHere')),
-      tr.buffer ? null : h('button', { class: 'btn small', onclick: () => convertToInstrument(tr), title: t('toInstrumentTip') }, '♪ ' + t('toInstrument')),
-      h('button', { class: 'btn small', onclick: () => normalizeTrack(tr), disabled: !tr.buffer, title: t('normalizeTip') }, t('normalize')),
-      h('button', { class: 'btn small', onclick: () => reverseTrack(tr), disabled: !tr.buffer }, t('reverse')),
-      h('button', { class: 'btn small', onclick: () => splitTrack(tr), disabled: !tr.buffer, title: t('splitTip') }, t('split')),
-      h('button', { class: 'btn small', onclick: () => openCleanupDialog(tr), disabled: !tr.buffer, title: t('cleanTip') }, '〰 ' + t('cleanBtn')),
-      S.server ? h('button', {
-        class: 'btn small ai',
-        onclick: () => openSeparationDialog(tr),
-        disabled: !tr.buffer || !!S.sepJob,
-        title: S.separation && !S.separation.available ? S.separation.reason : t('sepTip'),
-      }, '✦ ' + t('separateBtn')) : null,
+    const clips = audioClips(tr);
+    const trackActions = h('div', { class: 'btn-row' },
+      h('button', { class: 'btn small', onclick: () => loadAudioIntoTrack(tr), title: t('addAudioHereTip') }, '⇪ ' + t('addAudioHere')),
+      h('button', { class: 'btn small', onclick: () => { S.selectedId = tr.id; toggleRecord(); }, disabled: !!S.recording, title: t('recordHereTip') }, '● ' + t('recordHere')),
+      clips.length ? null : h('button', { class: 'btn small', onclick: () => convertToInstrument(tr), title: t('toInstrumentTip') }, '♪ ' + t('toInstrument')),
       h('button', { class: 'btn small', onclick: () => { const c = duplicateTrack(tr, t('copySuffix')); S.selectedId = c.id; renderAll(); } }, t('duplicate')),
       h('button', { class: 'btn small', onclick: () => moveTrack(tr, -1), title: t('moveUp') }, '▲'),
       h('button', { class: 'btn small', onclick: () => moveTrack(tr, 1), title: t('moveDown') }, '▼'),
-      h('button', { class: 'btn small danger', onclick: () => deleteTrack(tr) }, t('delete')));
+      h('button', { class: 'btn small danger', onclick: () => deleteTrack(tr) }, t('deleteTrack')));
 
-    const editing = tr.buffer ? [
-      ctl(C, { label: t('offset') + ' (s)', min: 0, max: 3600, step: 0.01, def: 0, fmt: v => v.toFixed(3), get: () => tr.offset, set: v => { tr.offset = v; }, onChange: () => afterClip(tr) }),
-      ctl(C, { label: t('trimStart') + ' (s)', min: 0, max: tr.buffer.duration, step: 0.01, def: 0, fmt: v => v.toFixed(3), get: () => tr.trimStart, set: v => { tr.trimStart = Math.min(v, tr.trimEnd - MIN_CLIP); }, onChange: () => afterClip(tr) }),
-      ctl(C, { label: t('trimEnd') + ' (s)', min: 0, max: tr.buffer.duration, step: 0.01, def: tr.buffer.duration, fmt: v => v.toFixed(3), get: () => tr.trimEnd, set: v => { tr.trimEnd = Math.max(v, tr.trimStart + MIN_CLIP); }, onChange: () => afterClip(tr) }),
-      ctl(C, { label: t('fadeIn') + ' (s)', min: 0, max: 30, step: 0.01, def: 0, fmt: v => v.toFixed(2), get: () => tr.fadeIn, set: v => { tr.fadeIn = v; }, onChange: () => afterClip(tr) }),
-      ctl(C, { label: t('fadeOut') + ' (s)', min: 0, max: 30, step: 0.01, def: 0, fmt: v => v.toFixed(2), get: () => tr.fadeOut, set: v => { tr.fadeOut = v; }, onChange: () => afterClip(tr) }),
-      ctl(C, { label: t('clipGain') + ' (dB)', min: -24, max: 24, step: 0.1, def: 0, fmt: fmtDb, get: () => tr.clipGainDb, set: v => { tr.clipGainDb = round(v, 2); tr.loudCache = null; }, onChange: () => afterClip(tr) }),
-    ] : [h('p', { class: 'hint', text: t('needAudioForEdit') })];
+    const c = S.focus && tr.clips.includes(S.focus) ? S.focus : clips.length === 1 ? clips[0] : null;
+    const body = [top, h('p', { class: 'file-info', text: t('clipsInfo', { n: clips.length }) }), trackActions];
+    if (!c) {
+      body.push(h('p', { class: 'hint', text: clips.length ? t('selectClipHint') : t('needAudioForEdit') }));
+      return card(t('trackCard'), { cls: 'card-track' }, ...body);
+    }
 
-    return card(t('trackCard'), { cls: 'card-track' }, top, h('p', { class: 'file-info', text: info }), actions, ...editing);
+    const info = c.buffer
+      ? `${c.fileName || ''} · ${c.buffer.duration.toFixed(2)} s · ${c.buffer.numberOfChannels === 1 ? t('mono') : t('stereo')} · ${c.buffer.sampleRate} Hz`
+      : '⚠ ' + t('clipMissing', { name: c.fileName || '?' });
+    const clipActions = h('div', { class: 'btn-row' },
+      c.buffer ? null : h('button', { class: 'btn small accent', onclick: () => loadAudioIntoClip(c) }, '⇪ ' + t('loadAudio')),
+      h('button', { class: 'btn small', onclick: () => normalizeClip(c), disabled: !c.buffer, title: t('normalizeTip') }, t('normalize')),
+      h('button', { class: 'btn small', onclick: () => reverseClip(c), disabled: !c.buffer }, t('reverse')),
+      h('button', { class: 'btn small', onclick: () => splitAtPlayhead(c), disabled: !c.buffer, title: t('splitTip') }, t('split')),
+      h('button', { class: 'btn small', onclick: () => openCleanupDialog(c), disabled: !c.buffer, title: t('cleanTip') }, '〰 ' + t('cleanBtn')),
+      S.server ? h('button', {
+        class: 'btn small ai',
+        onclick: () => openSeparationDialog(c),
+        disabled: !c.buffer || !!S.sepJob,
+        title: S.separation && !S.separation.available ? S.separation.reason : t('sepTip'),
+      }, '✦ ' + t('separateBtn')) : null,
+      h('button', { class: 'btn small danger', onclick: () => deleteClips([c]) }, t('deleteClip')));
+
+    const after = () => afterClip(c);
+    const editing = c.buffer ? [
+      ctl(C, { label: t('offset') + ' (s)', min: 0, max: 3600, step: 0.01, def: 0, fmt: v => v.toFixed(3), get: () => c.offset, set: v => { c.offset = v; }, onChange: after }),
+      ctl(C, { label: t('trimStart') + ' (s)', min: 0, max: c.buffer.duration, step: 0.01, def: 0, fmt: v => v.toFixed(3), get: () => c.trimStart, set: v => { c.trimStart = Math.min(v, c.trimEnd - MIN_CLIP); }, onChange: after }),
+      ctl(C, { label: t('trimEnd') + ' (s)', min: 0, max: c.buffer.duration, step: 0.01, def: c.buffer.duration, fmt: v => v.toFixed(3), get: () => c.trimEnd, set: v => { c.trimEnd = Math.max(v, c.trimStart + MIN_CLIP); }, onChange: after }),
+      ctl(C, { label: t('fadeIn') + ' (s)', min: 0, max: 30, step: 0.01, def: 0, fmt: v => v.toFixed(2), get: () => c.fadeIn, set: v => { c.fadeIn = v; }, onChange: after }),
+      ctl(C, { label: t('fadeOut') + ' (s)', min: 0, max: 30, step: 0.01, def: 0, fmt: v => v.toFixed(2), get: () => c.fadeOut, set: v => { c.fadeOut = v; }, onChange: after }),
+      ctl(C, { label: t('clipGain') + ' (dB)', min: -24, max: 24, step: 0.1, def: 0, fmt: fmtDb, get: () => c.clipGainDb, set: v => { c.clipGainDb = round(v, 2); c.loudCache = null; }, onChange: after }),
+    ] : [];
+
+    body.push(h('h4', { class: 'sub-title', text: t('clipCard') }), h('p', { class: 'file-info', text: info }), clipActions, ...editing);
+    return card(t('trackCard'), { cls: 'card-track' }, ...body);
   }
 
   function cardMix(tr) {
@@ -2387,7 +2929,7 @@
     requestAnimationFrame(frame);
   }
 
-  /* ---------- Instrument (note) tracks ---------- */
+  /* ---------- Instrument tracks and patterns ---------- */
   const NOTE_EPS = 1e-6;
 
   function sanitizeNotes(list) {
@@ -2407,15 +2949,20 @@
     const tr = createTrack(L(Synth.INSTRUMENTS[inst].name), Synth.INSTRUMENTS[inst].role, undefined, 'notes');
     tr.instrument = inst;
     S.selectedId = tr.id;
+    const p = createPattern(null, 4);
+    const c = newPatternClip(p.id, Math.floor(position() / barSec() + NOTE_EPS) * 4, 4, 0);
+    tr.clips.push(c);
+    S.selClips = new Set([c]);
+    S.focus = c;
     renderAll();
-    toast(t('instTrackAdded'), 4500);
+    updateEditButtons();
+    toast(t('instTrackAdded'), 5000);
   }
 
   function convertToInstrument(tr) {
-    if (tr.buffer || tr.kind !== 'audio') return;
+    if (tr.clips.length || tr.kind !== 'audio') return;
     tr.kind = 'notes';
     tr.instrument = 'piano';
-    tr.notes = [];
     if (tr.role === 'other') tr.role = Synth.INSTRUMENTS.piano.role;
     renderAll();
   }
@@ -2428,20 +2975,81 @@
     sel.value = '';
   }
 
-  const notesInRange = (tr, b0, b1) => tr.notes.filter(n => n.t >= b0 - NOTE_EPS && n.t < b1 - NOTE_EPS);
+  // Clips playing a pattern, on any track.
+  const patternClips = pid => S.tracks.flatMap(x => x.clips.filter(c => isPat(c) && c.pattern === pid));
 
-  // Bar to open in the editor: the selected bar on this track, else the bar under the playhead.
-  function defaultBarFor(tr) {
-    if (S.sel && S.sel.trackId === tr.id && S.sel.kind === 'notes') return Math.floor(S.sel.b0 / 4);
-    return Math.floor(position() / barSec() + NOTE_EPS);
+  // Change a pattern's length; clips that showed the whole pattern follow it.
+  function setPatternLen(p, len) {
+    const old = p.len;
+    p.len = clamp(len, MIN_PAT, 4096);
+    if (p.len === old) return;
+    for (const c of patternClips(p.id)) if (!c.from && Math.abs(c.len - old) < NOTE_EPS) c.len = p.len;
   }
 
-  function openBarEditor(tr, bar) {
+  // After notes changed: grow the pattern to whole bars around its notes and redraw its clips.
+  function onPatternChanged(p) {
+    p.notes.sort((a, b) => a.t - b.t || a.p - b.p);
+    const end = p.notes.reduce((m, n) => Math.max(m, n.t + n.d), 0);
+    const need = Math.ceil(end / 4 - NOTE_EPS) * 4;
+    if (need > p.len + NOTE_EPS) setPatternLen(p, need);
+    redrawPatternClips(p.id);
+    refreshCtrls();
+    checkTimelineSize();
+  }
+
+  function openPatternEditor(tr, c) {
+    if (!isPat(c)) return;
+    selectTrack(tr.id, true);
+    if (!S.selClips.has(c)) selectClips([c]);
+    S.noteEditor.open(tr, c.pattern);
+  }
+
+  // ✎ / Enter: edit the selected pattern clip of this track, the one under the playhead, or a new one.
+  function openPatternEditorFor(tr) {
     if (tr.kind !== 'notes') return;
-    bar = Math.max(0, bar | 0);
-    selectTrack(tr.id);
-    setSelection({ trackId: tr.id, kind: 'notes', b0: bar * 4, b1: bar * 4 + 4 });
-    S.noteEditor.open(tr, bar);
+    const pos = position();
+    const c = (S.focus && tr.clips.includes(S.focus) && S.focus)
+      || tr.clips.find(x => pos >= clipStart(x) && pos < clipEnd(x))
+      || tr.clips[0];
+    if (c) openPatternEditor(tr, c);
+    else newPatternAt(tr, pos);
+  }
+
+  // New empty pattern (one bar) on a track at the bar containing `time`, opened in the editor.
+  function newPatternAt(tr, time) {
+    pushUndo(t('undoNewPattern'));
+    adoptKind(tr, 'notes');
+    const p = createPattern(null, 4);
+    const c = newPatternClip(p.id, Math.floor(time / barSec() + NOTE_EPS) * 4, 4, 0);
+    tr.clips.push(c);
+    selectTrack(tr.id, true);
+    S.selClips = new Set([c]);
+    S.focus = c;
+    afterEdit();
+    S.noteEditor.open(tr, p.id);
+  }
+
+  // Place an existing pattern at the playhead bar.
+  function placePattern(tr, pid) {
+    const p = getPattern(pid);
+    if (!p) return;
+    pushUndo(t('undoPlacePattern'));
+    const c = newPatternClip(pid, Math.floor(position() / barSec() + NOTE_EPS) * 4, p.len, 0);
+    tr.clips.push(c);
+    S.selClips = new Set([c]);
+    S.focus = c;
+    afterEdit();
+  }
+
+  // Give a clip its own copy of the pattern, so editing it no longer changes the other clips.
+  function makeUnique(c) {
+    const p = getPattern(c.pattern);
+    if (!p) return;
+    pushUndo(t('makeUnique'));
+    const np = createPattern(null, p.len);
+    np.notes = p.notes.map(n => ({ ...n }));
+    c.pattern = np.id;
+    afterEdit();
   }
 
   function previewNote(tr, pitch, vel) {
@@ -2449,77 +3057,14 @@
     Synth.play(S.ctx, tr.channel.input, tr.instrument, pitch, vel, S.ctx.currentTime, Synth.isDrum(tr.instrument) ? 0.1 : 0.4, tr.sampler);
   }
 
-  // Play one bar of a track (editor preview). Returns { start, duration, stop() }.
-  function playBar(tr, bar) {
+  // Play a pattern once from beat `from` (pattern editor). Returns { start, from, duration, stop() }.
+  function playPattern(tr, p, from) {
     S.ctx.resume();
-    const start = S.ctx.currentTime + 0.05;
-    const b0 = bar * 4, spb = beatSec();
-    const voices = notesInRange(tr, b0, b0 + 4).map(n =>
-      Synth.play(S.ctx, tr.channel.input, tr.instrument, n.p, n.v, start + (n.t - b0) * spb, n.d * spb, tr.sampler));
-    return { start, duration: barSec(), stop() { voices.forEach(v => v.stop()); } };
-  }
-
-  function onNotesChanged(tr) {
-    tr.notes.sort((a, b) => a.t - b.t || a.p - b.p);
-    redrawNotesLane(tr);
-    refreshCtrls();
-    checkTimelineSize();
-  }
-
-  // Bar cells with a mini piano-roll of each bar.
-  function buildNotesCells(tr, lane, laneW) {
-    lane.querySelectorAll('.bar-cell, .lane-msg').forEach(el => el.remove());
-    const barPx = barSec() * S.pps;
-    const nBars = Math.ceil(laneW / barPx);
-    const drums = Synth.isDrum(tr.instrument);
-    let lo = 48, hi = 72;
-    if (!drums && tr.notes.length) {
-      lo = Math.min(...tr.notes.map(n => n.p)) - 2;
-      hi = Math.max(...tr.notes.map(n => n.p)) + 2;
-      if (hi - lo < 12) { const c = (hi + lo) / 2; lo = Math.floor(c - 6); hi = Math.ceil(c + 6); }
-    }
-    const byBar = new Map();
-    for (const n of tr.notes) {
-      const b = Math.floor(n.t / 4 + NOTE_EPS);
-      if (!byBar.has(b)) byBar.set(b, []);
-      byBar.get(b).push(n);
-    }
-    const frag = document.createDocumentFragment();
-    const dpr = window.devicePixelRatio || 1;
-    for (let b = 0; b < nBars; b++) {
-      const notes = byBar.get(b);
-      const cell = h('div', { class: 'bar-cell' + (notes ? ' has' : ''), style: `left:${b * barPx}px;width:${barPx}px` });
-      if (barPx >= 22) cell.append(h('span', { class: 'bar-num', text: String(b + 1) }));
-      if (notes) {
-        const cv = h('canvas', { class: 'bar-notes' });
-        const w = Math.max(1, Math.round(barPx - 2)), hh = 84;
-        cv.width = Math.round(w * dpr);
-        cv.height = Math.round(hh * dpr);
-        const g = cv.getContext('2d');
-        g.scale(dpr, dpr);
-        g.fillStyle = tr.color;
-        const rows = drums ? Synth.DRUM_KIT.length : hi - lo + 1;
-        const rh = hh / rows;
-        for (const n of notes) {
-          const r = drums ? Synth.DRUM_KIT.findIndex(k => k.p === n.p) : hi - n.p;
-          if (r < 0) continue;
-          const x = ((n.t - b * 4) / 4) * w;
-          const nw = drums ? Math.max(2, w / 32) : Math.max(2, (n.d / 4) * w);
-          g.globalAlpha = 0.45 + (n.v / 127) * 0.55;
-          g.fillRect(x, r * rh, Math.min(nw, w - x), Math.max(2, rh - 1));
-        }
-        cell.append(cv);
-      }
-      frag.append(cell);
-    }
-    lane.append(frag);
-    if (!tr.notes.length) lane.append(h('div', { class: 'lane-msg hint-msg', text: t('notesLaneHint') }));
-  }
-
-  function redrawNotesLane(tr) {
-    if (!tr.ui || !tr.ui.lane || !tr.ui.lane.isConnected) return;
-    buildNotesCells(tr, tr.ui.lane, $('#tlInner').dataset.laneW | 0);
-    updateSelectionOverlay();
+    from = clamp(from || 0, 0, Math.max(0, p.len - MIN_PAT));
+    const start = S.ctx.currentTime + 0.05, spb = beatSec();
+    const voices = p.notes.filter(n => n.t >= from - NOTE_EPS && n.t < p.len - NOTE_EPS).map(n =>
+      Synth.play(S.ctx, tr.channel.input, tr.instrument, n.p, n.v, start + (n.t - from) * spb, Math.min(n.d, p.len - n.t) * spb, tr.sampler));
+    return { start, from, duration: (p.len - from) * spb, stop() { voices.forEach(v => v.stop()); } };
   }
 
   function cardNotesTrack(tr, top) {
@@ -2531,36 +3076,55 @@
       const oldRole = Synth.INSTRUMENTS[tr.instrument].role;
       tr.instrument = instSel.value;
       if (tr.role === oldRole) tr.role = Synth.INSTRUMENTS[tr.instrument].role;
-      redrawNotesLane(tr);
+      for (const c of tr.clips) layoutClip(c);
       for (const c of S.trackCtrls) c.refresh();
       renderInspector();
       S.noteEditor.refresh();
     });
-    const info = h('p', { class: 'file-info' });
-    C.push({
-      refresh() {
-        const bars = new Set(tr.notes.map(n => Math.floor(n.t / 4 + NOTE_EPS))).size;
-        info.textContent = t('notesInfo', { n: tr.notes.length, bars });
-      },
-    });
+    const pcs = tr.clips.filter(isPat);
+    const info = h('p', { class: 'file-info', text: t('patternsInfo', { clips: pcs.length, patterns: new Set(pcs.map(c => c.pattern)).size }) });
+
+    const placeSel = h('select', { 'aria-label': t('placePattern') },
+      S.patterns.map(p => h('option', { value: p.id, text: p.name })));
     const actions = h('div', { class: 'btn-row' },
-      h('button', { class: 'btn small accent', onclick: () => openBarEditor(tr, defaultBarFor(tr)), title: t('editBarTip') }, '✎ ' + t('editBar')),
-      h('button', { class: 'btn small', onclick: () => {
-        if (!tr.notes.length || !confirm(t('confirmClearNotes'))) return;
-        pushUndo(t('clearNotes'), [tr]);
-        tr.notes = [];
-        onNotesChanged(tr);
-      } }, t('clearNotes')),
+      h('button', { class: 'btn small accent', onclick: () => newPatternAt(tr, position()), title: t('newPatternTip') }, '+ ' + t('newPattern')),
+      S.patterns.length ? h('span', { class: 'inline-pick' }, placeSel,
+        h('button', { class: 'btn small', onclick: () => placePattern(tr, +placeSel.value), title: t('placePatternTip') }, t('placePattern'))) : null,
       h('button', { class: 'btn small', onclick: () => { const c = duplicateTrack(tr, t('copySuffix')); S.selectedId = c.id; renderAll(); } }, t('duplicate')),
       h('button', { class: 'btn small', onclick: () => moveTrack(tr, -1), title: t('moveUp') }, '▲'),
       h('button', { class: 'btn small', onclick: () => moveTrack(tr, 1), title: t('moveDown') }, '▼'),
-      h('button', { class: 'btn small danger', onclick: () => deleteTrack(tr) }, t('delete')));
-    return card(t('trackCard'), { cls: 'card-track' },
-      top,
-      h('label', { class: 'form-grid single' }, h('span', { class: 'lbl', text: t('instrument') }), instSel),
-      info,
-      actions,
-      h('p', { class: 'hint', text: t('notesTrackHint') }));
+      h('button', { class: 'btn small danger', onclick: () => deleteTrack(tr) }, t('deleteTrack')));
+
+    const body = [top, h('label', { class: 'form-grid single' }, h('span', { class: 'lbl', text: t('instrument') }), instSel), info, actions];
+    const c = S.focus && tr.clips.includes(S.focus) ? S.focus : pcs.length === 1 ? pcs[0] : null;
+    const p = c && getPattern(c.pattern);
+    if (!c || !p) {
+      body.push(h('p', { class: 'hint', text: t(pcs.length ? 'selectPatternHint' : 'notesTrackHint') }));
+      return card(t('trackCard'), { cls: 'card-track' }, ...body);
+    }
+    const uses = patternClips(p.id).length;
+    const nameIn = h('input', { type: 'text', class: 'text-in', maxlength: 80, value: p.name, 'aria-label': t('patternName') });
+    nameIn.addEventListener('input', () => { p.name = nameIn.value || t('patternN', { n: p.id }); redrawPatternClips(p.id); S.noteEditor.refresh(); });
+    const after = () => afterClip(c);
+    // Kept up to date while the pattern is edited.
+    const patInfo = h('p', { class: 'file-info' });
+    C.push({ refresh() { patInfo.textContent = t('patternInfo', { notes: p.notes.length, uses: patternClips(p.id).length }); } });
+    body.push(
+      h('h4', { class: 'sub-title', text: t('patternCard') }),
+      h('label', { class: 'form-grid single' }, h('span', { class: 'lbl', text: t('patternName') }), nameIn),
+      patInfo,
+      h('div', { class: 'btn-row' },
+        h('button', { class: 'btn small accent', onclick: () => openPatternEditor(tr, c) }, '✎ ' + t('editPattern')),
+        uses > 1 ? h('button', { class: 'btn small', onclick: () => makeUnique(c), title: t('makeUniqueTip') }, t('makeUnique')) : null,
+        h('button', { class: 'btn small', onclick: () => splitAtPlayhead(c), title: t('splitTip') }, t('split')),
+        h('button', { class: 'btn small danger', onclick: () => deleteClips([c]) }, t('deleteClip'))),
+      ctl(C, { label: t('patternLen') + ' (' + t('bars') + ')', min: 0.25, max: 64, step: 0.25, def: 1, fmt: v => String(round(v, 2)),
+        get: () => p.len / 4, set: v => { setPatternLen(p, Math.round(v * 4 * 4) / 4); }, onChange: () => { redrawPatternClips(p.id); restartSoon(); checkTimelineSize(); S.noteEditor.refresh(); } }),
+      ctl(C, { label: t('clipStartBar'), min: 1, max: 999, step: 0.25, def: 1, fmt: v => String(round(v, 2)),
+        get: () => c.start / 4 + 1, set: v => { c.start = (v - 1) * 4; }, onChange: after }),
+      ctl(C, { label: t('clipLenBars'), min: 0.25, max: 256, step: 0.25, def: p.len / 4, fmt: v => String(round(v, 2)),
+        get: () => c.len / 4, set: v => { c.len = v * 4; }, onChange: after }));
+    return card(t('trackCard'), { cls: 'card-track' }, ...body);
   }
 
   /* ---------- Sampler: user-uploaded instrument sounds ---------- */
@@ -2744,92 +3308,58 @@
     }, list, settings, h('p', { class: 'hint', text: t(drum ? 'samplerHintDrums' : 'samplerHint') }));
   }
 
-  /* ---------- Selection ---------- */
-  function setSelection(sel) {
+  /* ---------- Selection: clips (move tool) and time ranges (range tool) ---------- */
+  function setRange(sel) {
     S.sel = sel;
     updateSelectionOverlay();
     updateEditButtons();
+  }
+
+  function selectClips(list) {
+    S.selClips = new Set(list);
+    S.focus = list.length ? list[list.length - 1] : null;
+    refreshClipSelection();
+    renderInspector();
+  }
+
+  function refreshClipSelection() {
+    if (S.clipUi) for (const [c, u] of S.clipUi) u.el.classList.toggle('sel', S.selClips.has(c));
+    updateEditButtons();
+  }
+
+  function selectAllClips() {
+    setRange(null);
+    selectClips(S.tracks.flatMap(x => x.clips));
   }
 
   function updateSelectionOverlay() {
     document.querySelectorAll('.sel-overlay').forEach(el => el.remove());
     const sel = S.sel;
     if (!sel) return;
-    const tr = S.tracks.find(x => x.id === sel.trackId);
-    if (!tr || !tr.ui || !tr.ui.lane) return;
-    const t0 = sel.kind === 'notes' ? sel.b0 * beatSec() : sel.t0;
-    const t1 = sel.kind === 'notes' ? sel.b1 * beatSec() : sel.t1;
-    tr.ui.lane.append(h('div', { class: 'sel-overlay', style: `left:${t0 * S.pps}px;width:${Math.max(2, (t1 - t0) * S.pps)}px` }));
+    for (const id of sel.ids) {
+      const tr = S.tracks.find(x => x.id === id);
+      if (!tr || !tr.ui || !tr.ui.lane) continue;
+      tr.ui.lane.append(h('div', { class: 'sel-overlay', style: `left:${sel.t0 * S.pps}px;width:${Math.max(2, (sel.t1 - sel.t0) * S.pps)}px` }));
+    }
   }
 
   function setTool(tool) {
     S.tool = tool;
     document.body.classList.toggle('tool-range', tool === 'range');
+    document.body.classList.toggle('tool-slice', tool === 'slice');
     $('#toolMove').classList.toggle('on', tool === 'move');
+    $('#toolSlice').classList.toggle('on', tool === 'slice');
     $('#toolRange').classList.toggle('on', tool === 'range');
   }
 
-  // Drag on an audio lane (range tool) to select a time range.
-  function rangePointer(tr, lane, e) {
-    e.preventDefault();
-    selectTrack(tr.id);
-    const timeAt = ev => Math.max(0, (ev.clientX - lane.getBoundingClientRect().left) / S.pps);
-    const snapT = (v, ev) => (S.snap && !ev.altKey ? Math.round(v / beatSec()) * beatSec() : v);
-    const t0 = snapT(timeAt(e), e);
-    let moved = false;
-    lane.setPointerCapture(e.pointerId);
-    const move = ev => {
-      if (!moved && Math.abs(ev.clientX - e.clientX) <= 3) return;
-      moved = true;
-      const t1 = snapT(timeAt(ev), ev);
-      setSelection({ trackId: tr.id, kind: 'audio', t0: Math.min(t0, t1), t1: Math.max(t0, t1) });
-    };
-    const up = () => {
-      lane.removeEventListener('pointermove', move);
-      lane.removeEventListener('pointerup', up);
-      lane.removeEventListener('pointercancel', up);
-      if (!moved) {
-        setSelection(null);
-        if (!S.recording) seek(t0);
-      }
-    };
-    lane.addEventListener('pointermove', move);
-    lane.addEventListener('pointerup', up);
-    lane.addEventListener('pointercancel', up);
-  }
-
-  // Click / drag / Shift+click on an instrument lane selects whole bars.
-  function notesLanePointer(tr, lane, e) {
-    e.preventDefault();
-    selectTrack(tr.id);
-    const barAt = ev => Math.max(0, Math.floor((ev.clientX - lane.getBoundingClientRect().left) / S.pps / barSec()));
-    const bar = barAt(e);
-    const extend = e.shiftKey && S.sel && S.sel.trackId === tr.id && S.sel.kind === 'notes';
-    const anchor = extend ? S.selAnchor : bar;
-    S.selAnchor = anchor;
-    const apply = b => setSelection({ trackId: tr.id, kind: 'notes', b0: Math.min(anchor, b) * 4, b1: (Math.max(anchor, b) + 1) * 4 });
-    apply(bar);
-    if (!S.playing && !S.recording) seek(Math.min(anchor, bar) * barSec());
-    lane.setPointerCapture(e.pointerId);
-    const move = ev => apply(barAt(ev));
-    const up = () => {
-      lane.removeEventListener('pointermove', move);
-      lane.removeEventListener('pointerup', up);
-      lane.removeEventListener('pointercancel', up);
-    };
-    lane.addEventListener('pointermove', move);
-    lane.addEventListener('pointerup', up);
-    lane.addEventListener('pointercancel', up);
-  }
-
   function updateEditButtons() {
-    const has = !!S.sel;
+    const has = !!S.sel || S.selClips.size > 0;
     $('#btnCut').disabled = !has;
     $('#btnCopy').disabled = !has;
     $('#btnDeleteSel').disabled = !has;
-    $('#btnCrop').disabled = !(has && S.sel.kind === 'audio');
+    $('#btnCrop').disabled = !S.sel;
     $('#btnPaste').disabled = !S.clipboard;
-    $('#btnPaste').title = t('paste') + (S.clipboard ? ` – ${t(S.clipboard.kind === 'notes' ? 'clipNotes' : 'clipAudio')}` : '') + ' (Ctrl+V)';
+    $('#btnPaste').title = t('paste') + (S.clipboard ? ` – ${t('clipboardClips', { n: S.clipboard.items.length })}` : '') + ' (Ctrl+V)';
     const u = S.undo[S.undo.length - 1], r = S.redo[S.redo.length - 1];
     $('#btnUndo').disabled = !u;
     $('#btnRedo').disabled = !r;
@@ -2837,57 +3367,50 @@
     $('#btnRedo').title = t('redo') + (r ? `: ${r.label}` : '') + ' (Ctrl+Shift+Z)';
   }
 
-  /* ---------- Undo / redo (snapshots of the edited tracks; audio buffers are immutable) ---------- */
-  function snapshotTrack(tr) {
+  /* ---------- Undo / redo: snapshots of every track's clips and of the patterns ----------
+   * Clip objects are copied (they are edited in place); audio buffers are immutable and shared. */
+  function snapshot() {
     return {
-      id: tr.id,
-      buffer: tr.buffer,
-      peaks: tr.peaks,
-      source: tr.source,
-      audioId: tr.audioId,
-      offset: tr.offset,
-      trimStart: tr.trimStart,
-      trimEnd: tr.trimEnd,
-      fadeIn: tr.fadeIn,
-      fadeOut: tr.fadeOut,
-      clipGainDb: tr.clipGainDb,
-      reversed: tr.reversed,
-      notes: clone(tr.notes || []),
+      tracks: S.tracks.map(x => ({ id: x.id, kind: x.kind, instrument: x.instrument, sampler: x.sampler, clips: x.clips.map(c => Object.assign({}, c)) })),
+      patterns: S.patterns.map(p => ({ id: p.id, name: p.name, len: p.len, notes: p.notes.map(n => ({ ...n })) })),
     };
   }
 
-  function pushUndo(label, tracks) {
-    S.undo.push({ label, snaps: tracks.map(snapshotTrack) });
+  function pushUndo(label) {
+    S.undo.push({ label, snap: snapshot() });
     if (S.undo.length > 100) S.undo.shift();
     S.redo = [];
     updateEditButtons();
   }
 
-  function restoreSnapshots(entry) {
-    const back = [];
-    for (const snap of entry.snaps) {
-      const tr = S.tracks.find(x => x.id === snap.id);
+  function restoreSnapshot(entry) {
+    const back = { label: entry.label, snap: snapshot() };
+    for (const s of entry.snap.tracks) {
+      const tr = S.tracks.find(x => x.id === s.id);
       if (!tr) continue; // the track was deleted
-      back.push(snapshotTrack(tr));
-      const { id, notes, ...rest } = snap;
-      Object.assign(tr, rest);
-      tr.notes = clone(notes);
-      tr.loudCache = null;
+      if (S.playing) stopVoices(tr);
+      tr.kind = s.kind;
+      tr.instrument = s.instrument;
+      tr.sampler = s.sampler;
+      tr.clips = s.clips.map(c => Object.assign({}, c));
     }
-    return { label: entry.label, snaps: back };
+    S.patterns = entry.snap.patterns.map(p => ({ ...p, notes: p.notes.map(n => ({ ...n })) }));
+    S.selClips = new Set();
+    S.focus = null;
+    return back;
   }
 
   function undo() {
     const e = S.undo.pop();
     if (!e) { toast(t('nothingToUndo')); return; }
-    S.redo.push(restoreSnapshots(e));
+    S.redo.push(restoreSnapshot(e));
     afterHistory(t('undone', { label: e.label }));
   }
 
   function redo() {
     const e = S.redo.pop();
     if (!e) { toast(t('nothingToRedo')); return; }
-    S.undo.push(restoreSnapshots(e));
+    S.undo.push(restoreSnapshot(e));
     afterHistory(t('redone', { label: e.label }));
   }
 
@@ -2900,145 +3423,188 @@
     toast(msg);
   }
 
-  /* ---------- Cut / copy / paste / delete / crop ---------- */
-  const selTrack = () => (S.sel ? S.tracks.find(x => x.id === S.sel.trackId) || null : null);
-
-  // The audio as heard on the timeline (trim applied) as a standalone buffer.
-  function bakeClip(tr) {
-    const sr = tr.buffer.sampleRate;
-    return DSP.sliceBuffer(S.ctx, tr.buffer, tr.trimStart * sr, tr.trimEnd * sr);
-  }
-
-  // Replace a track's audio with an edited buffer that starts at `offset`.
-  function setEditedBuffer(tr, buf, offset) {
-    if (S.playing) stopVoices(tr);
-    tr.buffer = buf;
-    tr.peaks = DSP.computePeaks(buf, PEAK_BLOCK);
-    tr.trimStart = 0;
-    tr.trimEnd = buf.duration;
-    tr.offset = Math.max(0, offset);
-    tr.reversed = false; // the edited audio is baked as heard
-    tr.source = null; // no longer matches the original file; re-uploaded as WAV when saved
-    tr.audioId = null;
-    tr.loudCache = null;
-    clampClip(tr);
-  }
-
-  // Sample range [s0, s1) of the selection inside the track's clip, or null if they don't overlap.
-  function audioRange(tr, t0, t1) {
-    if (!tr.buffer) return null;
-    const sr = tr.buffer.sampleRate, len = clipLen(tr);
-    const a = clamp(t0 - tr.offset, 0, len), b = clamp(t1 - tr.offset, 0, len);
-    return b - a > 0.005 ? { s0: Math.round(a * sr), s1: Math.round(b * sr) } : null;
-  }
-
-  function afterAudioEdit() {
+  // After structural clip edits: redraw everything that shows clips.
+  function afterEdit() {
     renderTimeline();
     renderInspector();
     restartSoon();
-  }
-
-  function editCopy(cut) {
-    const tr = selTrack();
-    if (!tr) { toast(t('selectRangeFirst'), 4000); return; }
-    if (S.sel.kind === 'notes') {
-      const { b0, b1 } = S.sel;
-      const notes = notesInRange(tr, b0, b1);
-      S.clipboard = { kind: 'notes', len: b1 - b0, notes: notes.map(n => ({ t: n.t - b0, d: n.d, p: n.p, v: n.v })) };
-      if (cut) {
-        pushUndo(t('undoCut'), [tr]);
-        const set = new Set(notes);
-        tr.notes = tr.notes.filter(n => !set.has(n));
-        onNotesChanged(tr);
-      }
-      toast(t(cut ? 'cutBars' : 'copiedBars', { n: (b1 - b0) / 4, notes: notes.length }));
-    } else {
-      const r = audioRange(tr, S.sel.t0, S.sel.t1);
-      if (!r) { toast(t('nothingToCopy')); return; }
-      const baked = bakeClip(tr);
-      S.clipboard = { kind: 'audio', buffer: DSP.sliceBuffer(S.ctx, baked, r.s0, r.s1) };
-      if (cut) {
-        pushUndo(t('undoCut'), [tr]);
-        setEditedBuffer(tr, DSP.composeBuffer(S.ctx, baked.length, baked.sampleRate, [{ buffer: baked, at: 0 }], [[r.s0, r.s1]]), tr.offset);
-        afterAudioEdit();
-      }
-      toast(t(cut ? 'cutAudio' : 'copiedAudio', { s: S.clipboard.buffer.duration.toFixed(2) }));
-    }
     updateEditButtons();
   }
 
-  function editDelete() {
-    const tr = selTrack();
-    if (!tr) return;
-    if (S.sel.kind === 'notes') {
-      const notes = notesInRange(tr, S.sel.b0, S.sel.b1);
-      if (!notes.length) return;
-      pushUndo(t('undoDelete'), [tr]);
-      const set = new Set(notes);
-      tr.notes = tr.notes.filter(n => !set.has(n));
-      onNotesChanged(tr);
+  /* ---------- Audio clip processing ---------- */
+  // The audio of a clip as heard (trim applied) as a standalone buffer.
+  function bakeClip(c) {
+    const sr = c.buffer.sampleRate;
+    return DSP.sliceBuffer(S.ctx, c.buffer, c.trimStart * sr, c.trimEnd * sr);
+  }
+
+  // Replace a clip's audio with an edited buffer that starts at `offset`.
+  function setEditedBuffer(c, buf, offset) {
+    const tr = trackOf(c);
+    if (S.playing && tr) stopVoices(tr);
+    c.buffer = buf;
+    c.peaks = DSP.computePeaks(buf, PEAK_BLOCK);
+    c.trimStart = 0;
+    c.trimEnd = buf.duration;
+    c.offset = Math.max(0, offset);
+    c.reversed = false; // the edited audio is baked as heard
+    c.source = null; // no longer matches the original file; uploaded as WAV when saved
+    c.audioId = null;
+    c.loudCache = null;
+    clampClip(c);
+  }
+
+  /* ---------- Cut / copy / paste / delete / crop ---------- */
+  // Part [a, b) (seconds) of a clip as a new clip; the original is not changed.
+  function clipPiece(c, a, b) {
+    const k = copyClip(c);
+    if (isPat(c)) {
+      const ba = a / beatSec(), bb = b / beatSec();
+      k.from = c.from + (ba - c.start);
+      k.start = ba;
+      k.len = bb - ba;
     } else {
-      const r = audioRange(tr, S.sel.t0, S.sel.t1);
-      if (!r) return;
-      pushUndo(t('undoDelete'), [tr]);
-      const baked = bakeClip(tr);
-      setEditedBuffer(tr, DSP.composeBuffer(S.ctx, baked.length, baked.sampleRate, [{ buffer: baked, at: 0 }], [[r.s0, r.s1]]), tr.offset);
-      afterAudioEdit();
+      k.trimStart = c.trimStart + (a - c.offset);
+      k.trimEnd = k.trimStart + (b - a);
+      k.offset = a;
+      if (a > c.offset + 1e-4) k.fadeIn = 0;
+      if (b < clipEnd(c) - 1e-4) k.fadeOut = 0;
+      clampClip(k);
     }
+    return k;
   }
 
-  // Keep only the selected part of an audio clip.
-  function editCrop() {
-    const tr = selTrack();
-    if (!tr || S.sel.kind !== 'audio') return;
-    const r = audioRange(tr, S.sel.t0, S.sel.t1);
-    if (!r) { toast(t('nothingToCopy')); return; }
-    pushUndo(t('crop'), [tr]);
-    const baked = bakeClip(tr);
-    setEditedBuffer(tr, DSP.sliceBuffer(S.ctx, baked, r.s0, r.s1), tr.offset + r.s0 / baked.sampleRate);
-    afterAudioEdit();
-  }
+  const overlaps = (c, t0, t1) => clipEnd(c) > t0 + 1e-4 && clipStart(c) < t1 - 1e-4;
 
-  // Paste into the selected track: at its selection if it has one, otherwise at the playhead.
-  // Notes replace the bars they cover; audio overwrites (other tracks stay in sync).
-  function editPaste() {
-    const c = S.clipboard;
-    if (!c) { toast(t('clipboardEmpty')); return; }
-    const tr = selected();
-    if (!tr) { toast(t('selectTrackFirst')); return; }
-    const kind = tr.kind === 'notes' ? 'notes' : 'audio';
-    if (c.kind !== kind) { toast(t('pasteKindMismatch'), 4500); return; }
-    if (S.recording && S.recording.target === tr) return;
-    const selHere = S.sel && S.sel.trackId === tr.id && S.sel.kind === kind;
-    if (kind === 'notes') {
-      const at = selHere ? S.sel.b0 : Math.floor(position() / barSec() + NOTE_EPS) * 4;
-      pushUndo(t('undoPaste'), [tr]);
-      const old = new Set(notesInRange(tr, at, at + c.len));
-      tr.notes = tr.notes.filter(n => !old.has(n));
-      tr.notes.push(...c.notes.map(n => ({ t: at + n.t, d: n.d, p: n.p, v: n.v })));
-      onNotesChanged(tr);
-      setSelection({ trackId: tr.id, kind: 'notes', b0: at, b1: at + c.len });
-      toast(t('pastedBars', { n: c.len / 4, bar: at / 4 + 1 }));
-    } else {
-      const at = selHere ? S.sel.t0 : position();
-      const clipBuf = c.buffer, sr = clipBuf.sampleRate;
-      pushUndo(t('undoPaste'), [tr]);
-      if (!tr.buffer) {
-        setEditedBuffer(tr, clipBuf, at);
-        if (!tr.fileName) tr.fileName = t('pastedAudio');
-      } else {
-        const baked = bakeClip(tr);
-        const start = Math.min(tr.offset, at);
-        const end = Math.max(tr.offset + baked.duration, at + clipBuf.duration);
-        setEditedBuffer(tr, DSP.composeBuffer(S.ctx, (end - start) * sr, sr, [
-          { buffer: baked, at: (tr.offset - start) * sr },
-          { buffer: clipBuf, at: (at - start) * sr },
-        ]), start);
+  // Remove [t0, t1) from a track, splitting clips that cross the edges. Nothing else moves.
+  function removeRange(tr, t0, t1) {
+    for (const c of tr.clips.slice()) {
+      if (!overlaps(c, t0, t1)) continue;
+      splitClip(c, t1);
+      const mid = clipStart(c) < t0 - 1e-4 ? splitClip(c, t0) : c;
+      if (mid) {
+        tr.clips.splice(tr.clips.indexOf(mid), 1);
+        S.selClips.delete(mid);
+        if (S.focus === mid) S.focus = null;
       }
-      afterAudioEdit();
-      setSelection({ trackId: tr.id, kind: 'audio', t0: at, t1: at + clipBuf.duration });
-      toast(t('pastedAudioAt', { s: clipBuf.duration.toFixed(2), at: fmtTime(at) }));
     }
+  }
+
+  function removeClips(list) {
+    for (const c of list) {
+      const tr = trackOf(c);
+      if (tr) tr.clips.splice(tr.clips.indexOf(c), 1);
+      S.selClips.delete(c);
+      if (S.focus === c) S.focus = null;
+    }
+  }
+
+  function deleteClips(list) {
+    if (!list.length) return;
+    pushUndo(t('undoDelete'));
+    removeClips(list);
+    afterEdit();
+  }
+
+  const rangeTracks = () => (S.sel ? S.sel.ids.map(id => S.tracks.find(x => x.id === id)).filter(Boolean) : []);
+
+  // Clipboard entry: the clip with its time relative to `t0` and its row relative to the top row.
+  function clipItem(tr, k, row, t0) {
+    if (isPat(k)) k.start -= t0 / beatSec(); else k.offset -= t0;
+    return { row, kind: clipKind(k), from: { instrument: tr.instrument, sampler: tr.sampler }, clip: k };
+  }
+
+  // Copy (or cut) the selected range, or else the selected clips.
+  function editCopy(cut) {
+    const items = [];
+    if (S.sel) {
+      const { t0, t1 } = S.sel;
+      const rows = rangeTracks();
+      const base = Math.min(...rows.map(x => S.tracks.indexOf(x)));
+      for (const tr of rows) {
+        for (const c of tr.clips) {
+          if (!overlaps(c, t0, t1) || (!isPat(c) && !c.buffer)) continue;
+          items.push(clipItem(tr, clipPiece(c, Math.max(t0, clipStart(c)), Math.min(t1, clipEnd(c))), S.tracks.indexOf(tr) - base, t0));
+        }
+      }
+      if (!items.length) { toast(t('nothingToCopy')); return; }
+      if (cut) { pushUndo(t('undoCut')); for (const tr of rows) removeRange(tr, t0, t1); }
+    } else if (S.selClips.size) {
+      const list = [...S.selClips];
+      const t0 = Math.min(...list.map(clipStart));
+      const base = Math.min(...list.map(c => S.tracks.indexOf(trackOf(c))));
+      for (const c of list) items.push(clipItem(trackOf(c), copyClip(c), S.tracks.indexOf(trackOf(c)) - base, t0));
+      if (cut) { pushUndo(t('undoCut')); removeClips(list); }
+    } else {
+      toast(t('selectRangeFirst'), 4000);
+      return;
+    }
+    S.clipboard = { items };
+    if (cut) afterEdit();
+    toast(t(cut ? 'cutClips' : 'copiedClips', { n: items.length }));
+    updateEditButtons();
+  }
+
+  /*
+   * Paste into the selected track (the top row of what was copied lands there, the others below it),
+   * at the start of its selected range or at the playhead. Clips only go to tracks of the same type
+   * (audio / instrument) or to empty tracks.
+   */
+  function editPaste() {
+    const cb = S.clipboard;
+    if (!cb) { toast(t('clipboardEmpty')); return; }
+    const base = selected();
+    if (!base) { toast(t('selectTrackFirst')); return; }
+    const bi = S.tracks.indexOf(base);
+    const at = S.sel && S.sel.ids.includes(base.id) ? S.sel.t0 : position();
+    pushUndo(t('undoPaste'));
+    const added = [];
+    let skipped = 0;
+    for (const it of cb.items) {
+      const tr = S.tracks[bi + it.row];
+      if (!tr || !(canHold(tr, it.kind) || added.some(c => trackOf(c) === tr && clipKind(c) === it.kind))) { skipped++; continue; }
+      adoptKind(tr, it.kind, it.from);
+      const k = copyClip(it.clip);
+      if (isPat(k)) k.start += at / beatSec(); else k.offset += at;
+      clampClip(k);
+      tr.clips.push(k);
+      added.push(k);
+    }
+    if (!added.length) {
+      S.undo.pop();
+      updateEditButtons();
+      toast(t('pasteKindMismatch'), 5000);
+      return;
+    }
+    S.sel = null;
+    S.selClips = new Set(added);
+    S.focus = added[added.length - 1];
+    afterEdit();
+    toast(t('pastedClips', { n: added.length, at: fmtTime(at) }) + (skipped ? ' ' + t('pasteSkipped', { n: skipped }) : ''), 4500);
+  }
+
+  function editDelete() {
+    if (S.sel) {
+      const rows = rangeTracks();
+      if (!rows.some(tr => tr.clips.some(c => overlaps(c, S.sel.t0, S.sel.t1)))) return;
+      pushUndo(t('undoDelete'));
+      for (const tr of rows) removeRange(tr, S.sel.t0, S.sel.t1);
+      afterEdit();
+    } else if (S.selClips.size) {
+      deleteClips([...S.selClips]);
+    }
+  }
+
+  // Keep only the selected range on the selected tracks.
+  function editCrop() {
+    if (!S.sel) return;
+    const { t0, t1 } = S.sel;
+    pushUndo(t('crop'));
+    for (const tr of rangeTracks()) {
+      removeRange(tr, 0, t0);
+      removeRange(tr, t1, 1e9);
+    }
+    afterEdit();
   }
 
   /* ---------- Global controls ---------- */
@@ -3112,6 +3678,7 @@
       e.target.value = '';
     });
     $('#toolMove').addEventListener('click', () => setTool('move'));
+    $('#toolSlice').addEventListener('click', () => setTool('slice'));
     $('#toolRange').addEventListener('click', () => setTool('range'));
     $('#btnCut').addEventListener('click', () => editCopy(true));
     $('#btnCopy').addEventListener('click', () => editCopy(false));
@@ -3153,7 +3720,7 @@
       renderTimeline();
       refreshCtrls();
       if (S.noteEditor) S.noteEditor.refresh();
-      restartSoon(); // note positions are in beats, so their timing changed
+      restartSoon(); // pattern clips are placed in beats, so their timing changed
     });
     $('#zoom').addEventListener('input', e => setZoom(+e.target.value));
     $('#snap').addEventListener('change', e => { S.snap = e.target.checked; });
@@ -3210,7 +3777,11 @@
           } catch (err) { toast(t('badFile')); }
         });
       }
-      addAudioFiles(files);
+      const lane = document.elementFromPoint(e.clientX, e.clientY);
+      const row = lane && lane.closest('.row.track');
+      const tr = row ? S.tracks.find(x => x.id === +row.dataset.id) : null;
+      if (tr && canHold(tr, 'audio')) addAudioFiles(files, tr, snapSec(laneTime(tr.ui.lane, e), e));
+      else addAudioFiles(files);
     });
 
     // Keyboard shortcuts (ignored while typing in form fields).
@@ -3221,7 +3792,8 @@
       if (document.querySelector('dialog[open]')) return; // dialogs handle their own keys
       if (!typing && (e.ctrlKey || e.metaKey) && !e.altKey) {
         const k = e.key.toLowerCase();
-        if (k === 'c') editCopy(false);
+        if (k === 'a') selectAllClips();
+        else if (k === 'c') editCopy(false);
         else if (k === 'x') editCopy(true);
         else if (k === 'v') editPaste();
         else if (k === 'z') { if (e.shiftKey) redo(); else undo(); }
@@ -3240,12 +3812,13 @@
         case 'r': case 'R': toggleRecord(); break;
         case 'm': case 'M': if (tr) { tr.mute = !tr.mute; afterMix(tr); } break;
         case 's': case 'S': if (tr) { tr.solo = !tr.solo; afterMix(tr); } break;
-        case 'b': case 'B': if (tr) splitTrack(tr); break;
+        case 'b': case 'B': splitAtPlayhead(); break;
         case 'v': case 'V': setTool('move'); break;
+        case 'c': case 'C': setTool('slice'); break;
         case 'e': case 'E': setTool('range'); break;
-        case 'Delete': case 'Backspace': if (S.sel) { e.preventDefault(); editDelete(); } break;
-        case 'Escape': setSelection(null); break;
-        case 'Enter': if (tr && tr.kind === 'notes') { e.preventDefault(); openBarEditor(tr, defaultBarFor(tr)); } break;
+        case 'Delete': case 'Backspace': if (S.sel || S.selClips.size) { e.preventDefault(); editDelete(); } break;
+        case 'Escape': setRange(null); selectClips([]); break;
+        case 'Enter': if (tr && tr.kind === 'notes') { e.preventDefault(); openPatternEditorFor(tr); } break;
         case 'ArrowUp': case 'ArrowDown': {
           if (!S.tracks.length) break;
           e.preventDefault();
@@ -3276,14 +3849,14 @@
     S.eqScratch = DSP.createEqNodes(S.ctx);
     S.noteEditor = createNoteEditor({
       S, h, t, L, toast,
-      onNotesChanged,
+      getPattern,
+      onPatternChanged,
+      setPatternLen: (p, len) => { setPatternLen(p, len); redrawPatternClips(p.id); restartSoon(); checkTimelineSize(); refreshCtrls(); },
       pushUndo,
       undo,
       redo,
-      updateEditButtons,
       preview: previewNote,
-      playBar,
-      onBarChanged: (tr, bar) => setSelection({ trackId: tr.id, kind: 'notes', b0: bar * 4, b1: bar * 4 + 4 }),
+      playPattern,
     });
     bindGlobalEvents();
     syncGlobalControls();

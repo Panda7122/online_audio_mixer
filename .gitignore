@@ -10,3 +10,7 @@ __pycache__/
 .env
 separated/
 musics/
+
+.dev.vars*
+!.dev.vars.example
+!.env.example

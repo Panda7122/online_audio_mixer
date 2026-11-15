@@ -159,6 +159,17 @@ test('deleting a project keeps samples used by another project', async () => {
   assert.equal((await fetch(`${base}${sample.url}`)).status, 404, 'removed with the last project');
 });
 
+test('deleting a project keeps clip audio used by another project', async () => {
+  const take = await (await uploadWav('Vocal take.wav')).json();
+  const clipTrack = { name: 'Vocal', kind: 'audio', clips: [{ type: 'audio', offset: 0, audioId: take.id }, { type: 'audio', offset: 8, audioId: take.id }] };
+  const a = await (await fetch(`${base}/api/projects`, json('POST', { name: 'A', settings: { tracks: [clipTrack] } }))).json();
+  const b = await (await fetch(`${base}/api/projects`, json('POST', { name: 'B', settings: { tracks: [clipTrack] } }))).json();
+  await fetch(`${base}/api/projects/${a.id}`, { method: 'DELETE' });
+  assert.equal((await fetch(`${base}${take.url}`)).status, 200, 'still used by clips of B');
+  await fetch(`${base}/api/projects/${b.id}`, { method: 'DELETE' });
+  assert.equal((await fetch(`${base}${take.url}`)).status, 404, 'removed with the last project');
+});
+
 test('access key', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oam-auth-'));
   const app = await createApp({
